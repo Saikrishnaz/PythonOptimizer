@@ -208,6 +208,55 @@ def auto_detect_trade_thresholds(rows: list, trading_days: int) -> tuple:
 # PARAMETER GENERATION
 # =============================================================================
 
+def axis_values(spec: dict):
+    """
+    The discrete values one parameter is allowed to take, honouring its step.
+
+    This is the single definition of a parameter axis, shared by grid, random
+    and Bayesian search so all three propose the same values. A step is a hard
+    constraint, not a hint: strategies routinely have parameters that are only
+    meaningful on a grid (an option spread distance must land on the strike
+    grid, so 137 names a contract that does not exist), and a mode that
+    ignores the step silently produces runs that can never trade.
+
+    Returns None when the axis is genuinely continuous — a float parameter
+    with no usable step — which is the caller's cue to treat it as an interval.
+
+    Values are computed as min + i * step rather than by repeated addition, so
+    a step of 0.1 lands on 0.1/0.2/0.3 exactly instead of drifting, and a step
+    of 1000 is just as valid as a step of 0.1.
+    """
+    if "choices" in spec:
+        return list(spec["choices"])
+    if "min" not in spec or "max" not in spec:
+        return [spec.get("value", spec.get("min", 0))]
+
+    ptype = spec.get("type", "float")
+    low = float(spec["min"])
+    high = float(spec["max"])
+    try:
+        step = float(spec.get("step") or 0)
+    except (TypeError, ValueError):
+        step = 0.0
+
+    if step <= 0:
+        # No usable step: ints still walk in whole numbers, floats are free.
+        if ptype != "int":
+            return None
+        step = 1.0
+
+    # 1e-9 slack so a step that divides the range exactly in real arithmetic
+    # isn't cut short by binary float representation (0.5 + 25 * 0.1 <= 3.0).
+    count = int(math.floor((high - low) / step + 1e-9))
+    values = [low + i * step for i in range(max(count, 0) + 1)]
+
+    if ptype == "int":
+        # A fractional step on an int axis can round two indices onto the same
+        # value; keep the axis strictly increasing and free of duplicates.
+        return sorted(dict.fromkeys(int(round(v)) for v in values))
+    return [round(v, 10) for v in values]
+
+
 def grid_axes(optimize_params: dict):
     """Parameter names and the discrete value list for each, in declared order."""
     param_names = []
@@ -215,23 +264,12 @@ def grid_axes(optimize_params: dict):
 
     for name, spec in optimize_params.items():
         param_names.append(name)
-        if "choices" in spec:
-            param_values.append(list(spec["choices"]))
-        elif "min" in spec and "max" in spec:
-            # A zero/None step would spin forever; treat it as the default 1.
-            step = spec.get("step", 1) or 1
-            ptype = spec.get("type", "float")
-            vals = []
-            v = spec["min"]
-            while v <= spec["max"] + 1e-9:
-                if ptype == "int":
-                    vals.append(int(round(v)))
-                else:
-                    vals.append(round(v, 6))
-                v += step
-            param_values.append(vals)
-        else:
-            param_values.append([spec.get("value", spec.get("min", 0))])
+        values = axis_values(spec)
+        if values is None:
+            # A grid needs a finite axis, so a stepless float falls back to the
+            # whole-number walk between its bounds, as it always has.
+            values = axis_values({**spec, "step": 1})
+        param_values.append(values)
 
     return param_names, param_values
 
@@ -239,6 +277,39 @@ def grid_axes(optimize_params: dict):
 def grid_size(param_values: list) -> int:
     """How many combinations the full cartesian product would contain."""
     return math.prod(len(v) for v in param_values)
+
+
+def describe_search_space(optimize_params: dict) -> dict:
+    """
+    How many distinct parameter combinations the declared ranges allow.
+
+    Returns {"axes": [...], "total": int | None}. Each axis reports how many
+    values it can take and the first few of them; "total" is the product, or
+    None when at least one axis is continuous (a stepless float), in which
+    case the space is unbounded and only sampling modes make sense.
+
+    Purely informational — nothing in the search depends on it. It answers
+    "is 250 Bayesian iterations a lot or a little for this space?", and it is
+    computed from the same axis_values() the search itself uses, so the count
+    is the real number of runnable combinations rather than an estimate.
+    """
+    axes = []
+    total = 1
+    for name, spec in optimize_params.items():
+        values = axis_values(spec)
+        if values is None:
+            axes.append({"name": name, "count": None, "continuous": True, "values": []})
+            total = None
+            continue
+        axes.append({
+            "name": name,
+            "count": len(values),
+            "continuous": False,
+            "values": values,
+        })
+        if total is not None:
+            total *= len(values)
+    return {"axes": axes, "total": total}
 
 
 def decode_grid_index(index: int, param_names: list, param_values: list) -> dict:
@@ -304,23 +375,15 @@ def generate_random_params(optimize_params: dict, n: int, seed: int = 42) -> lis
         attempts += 1
         combo = {}
         for name, spec in optimize_params.items():
-            if "choices" in spec:
-                combo[name] = rng.choice(spec["choices"])
-            elif "min" in spec and "max" in spec:
-                ptype = spec.get("type", "float")
-                if ptype == "int":
-                    combo[name] = rng.randint(int(spec["min"]), int(spec["max"]))
-                else:
-                    step = spec.get("step", None)
-                    if step and step > 0:
-                        # Snap to step grid
-                        steps_count = int((spec["max"] - spec["min"]) / step)
-                        chosen_step = rng.randint(0, steps_count)
-                        combo[name] = round(spec["min"] + chosen_step * step, 6)
-                    else:
-                        combo[name] = round(rng.uniform(spec["min"], spec["max"]), 6)
+            values = axis_values(spec)
+            if values is None:
+                # Genuinely continuous axis: draw anywhere in the interval.
+                combo[name] = round(rng.uniform(float(spec["min"]), float(spec["max"])), 6)
             else:
-                combo[name] = spec.get("value", 0)
+                # Stepped axis. Ints used to be drawn with a plain randint over
+                # the bounds, which ignored the step and could propose values
+                # the strategy has no data for.
+                combo[name] = rng.choice(values)
         
         key = json.dumps(combo, sort_keys=True, default=json_default)
         if key not in seen:
@@ -335,6 +398,72 @@ def generate_random_params(optimize_params: dict, n: int, seed: int = 42) -> lis
 BAYESIAN_INITIAL_POINTS = 10
 
 
+class SteppedOptimizer:
+    """
+    A skopt Optimizer that speaks in real parameter values.
+
+    A stepped axis is handed to skopt as an *index* into its value list, so a
+    step of 50 can only ever be asked for as 50/100/.../300 and a step of 0.1
+    only as 0.5/0.6/.../3.0. Indexing keeps the axis ordered — a Categorical
+    dimension would one-hot encode it and throw away the fact that 100 sits
+    between 50 and 150, which is most of what the surrogate model has to work
+    with on a numeric parameter.
+
+    ask() decodes indices back to values and tell() re-encodes them, so every
+    caller sees ordinary parameter dicts and neither side has to know the
+    difference.
+    """
+
+    def __init__(self, opt, axes: list):
+        self._opt = opt
+        # One entry per dimension: the value list for a stepped axis, or None
+        # for an axis skopt already handles natively (choices, continuous).
+        self._axes = axes
+
+    def _decode_point(self, point):
+        decoded = []
+        for value, values in zip(point, self._axes):
+            if values is None:
+                decoded.append(value)
+            else:
+                index = min(max(int(round(value)), 0), len(values) - 1)
+                decoded.append(values[index])
+        return decoded
+
+    def _encode_point(self, point):
+        encoded = []
+        for value, values in zip(point, self._axes):
+            if values is None:
+                encoded.append(value)
+            else:
+                encoded.append(_nearest_index(values, value))
+        return encoded
+
+    def ask(self, n_points=None):
+        if n_points is None:
+            return self._decode_point(self._opt.ask())
+        points = self._opt.ask(n_points=n_points)
+        if points and not isinstance(points[0], (list, tuple)):
+            points = [points]
+        return [self._decode_point(point) for point in points]
+
+    def tell(self, point, objective):
+        return self._opt.tell(self._encode_point(point), objective)
+
+
+def _nearest_index(values: list, value) -> int:
+    """Position of `value` in an axis, snapping to the closest entry."""
+    try:
+        return values.index(value)
+    except ValueError:
+        pass
+    try:
+        target = float(value)
+    except (TypeError, ValueError):
+        return 0
+    return min(range(len(values)), key=lambda i: abs(float(values[i]) - target))
+
+
 def build_bayesian_optimizer(optimize_params: dict, seed: int = 42,
                              n_initial_points: int = BAYESIAN_INITIAL_POINTS):
     """
@@ -343,6 +472,12 @@ def build_bayesian_optimizer(optimize_params: dict, seed: int = 42,
     Returns (optimizer, param_names). The optimizer is None when
     scikit-optimize isn't installed, which is the caller's cue to fall back
     to random search.
+
+    Stepped parameters are searched over their step grid via SteppedOptimizer.
+    This used to build Integer(min, max) / Real(min, max) straight from the
+    bounds, dropping the step: a spread_distance declared as 50..300 step 50
+    was proposed as 137, no option file exists for that strike, and the whole
+    run skipped every entry with option_file_missing.
     """
     param_names = list(optimize_params)
     try:
@@ -353,24 +488,32 @@ def build_bayesian_optimizer(optimize_params: dict, seed: int = 42,
         return None, param_names
 
     dimensions = []
+    axes = []
     for name, spec in optimize_params.items():
         if "choices" in spec:
-            dimensions.append(Categorical(spec["choices"], name=name))
-        elif "min" in spec and "max" in spec:
-            ptype = spec.get("type", "float")
-            if ptype == "int":
-                dimensions.append(Integer(int(spec["min"]), int(spec["max"]), name=name))
-            else:
-                dimensions.append(Real(float(spec["min"]), float(spec["max"]), name=name))
+            # skopt handles a genuine categorical natively.
+            dimensions.append(Categorical(list(spec["choices"]), name=name))
+            axes.append(None)
+            continue
+
+        values = axis_values(spec)
+        if values is None:
+            dimensions.append(Real(float(spec["min"]), float(spec["max"]), name=name))
+            axes.append(None)
+        elif len(values) <= 1:
+            # A one-value axis has nothing to search; Integer(0, 0) is degenerate.
+            dimensions.append(Categorical([0], name=name))
+            axes.append(values)
         else:
-            dimensions.append(Categorical([spec.get("value", 0)], name=name))
+            dimensions.append(Integer(0, len(values) - 1, name=name))
+            axes.append(values)
 
     opt = SkoptOptimizer(
         dimensions,
         random_state=seed,
         n_initial_points=max(1, min(n_initial_points, 1000)),
     )
-    return opt, param_names
+    return SteppedOptimizer(opt, axes), param_names
 
 
 def ask_bayesian_points(opt, param_names: list, count: int) -> list:
