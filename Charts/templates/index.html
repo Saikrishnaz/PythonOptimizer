@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XAUUSD — TradingView Lightweight Charts (MULTIBANK)</title>
+    <!-- Lightweight Charts CDN -->
+    <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+    <!-- FontAwesome for TradingView-style icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="light-theme">
+    <div class="tv-app-container">
+        <!-- ================= TOP HEADER TOOLBAR ================= -->
+        <header class="tv-header">
+            <div class="tv-header-left">
+                <div class="user-badge" title="Account Profile">
+                    <span>S</span>
+                    <span class="badge-count">11</span>
+                </div>
+                
+                <div class="header-divider"></div>
+
+                <!-- Symbol Search / Ticker Button -->
+                <button class="symbol-btn" id="symbolBtn">
+                    <span class="symbol-title">XAUUSD</span>
+                </button>
+                <button class="icon-btn" title="Compare or Add Symbol"><i class="fa-solid fa-plus"></i></button>
+
+                <div class="header-divider"></div>
+
+                <!-- Timeframe Selector Toolbar -->
+                <div class="tf-selector" id="tfSelector">
+                    <button class="tf-btn" data-tf="1m">1m</button>
+                <button class="tf-btn" data-tf="2m">2m</button>
+                <button class="tf-btn" data-tf="3m">3m</button>
+                <button class="tf-btn" data-tf="5m">5m</button>
+                <button class="tf-btn" data-tf="10m">10m</button>
+                <button class="tf-btn active" data-tf="15m">15m</button>
+                <button class="tf-btn" data-tf="20m">20m</button>
+                <button class="tf-btn" data-tf="30m">30m</button>
+                <button class="tf-btn" data-tf="1h">1h</button>
+                <button class="tf-btn" data-tf="4h">4h</button>
+                <button class="tf-btn" data-tf="1D">1D</button>
+                </div>
+
+                <div class="header-divider"></div>
+
+                <button class="icon-btn active" title="Candlesticks"><i class="fa-solid fa-chart-candle"></i></button>
+
+                <div class="header-divider"></div>
+
+                <!-- Indicators Modal Button -->
+                <button class="indicators-btn" id="openIndicatorsBtn">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>Indicators</span>
+                    <i class="fa-solid fa-table-cells-large flex-icon"></i>
+                </button>
+
+                <button class="icon-btn" title="Alerts"><i class="fa-regular fa-clock"></i> <span>Alert</span></button>
+                <button class="icon-btn" title="Bar Replay"><i class="fa-solid fa-angles-left"></i> <span>Replay</span></button>
+
+                <div class="header-divider"></div>
+
+                <button class="icon-btn" title="Undo"><i class="fa-solid fa-rotate-left"></i></button>
+                <button class="icon-btn" title="Redo"><i class="fa-solid fa-rotate-right"></i></button>
+            </div>
+
+            <div class="tv-header-right">
+                <div class="loading-spinner hidden" id="headerSpinner" title="Loading data...">
+                    <i class="fa-solid fa-spinner fa-spin"></i>
+                </div>
+
+                <div class="layout-title">
+                    <i class="fa-regular fa-square"></i>
+                    <span>Unnamed</span>
+                    <i class="fa-solid fa-chevron-down"></i>
+                </div>
+                
+                <button class="icon-btn" id="themeToggleBtn" title="Toggle Light/Dark Theme"><i class="fa-solid fa-moon"></i></button>
+                <button class="icon-btn" title="Quick Search"><i class="fa-solid fa-magnifying-glass"></i></button>
+                <button class="icon-btn" title="Chart Settings"><i class="fa-solid fa-gear"></i></button>
+                <button class="icon-btn" id="fullscreenBtn" title="Fullscreen"><i class="fa-solid fa-expand"></i></button>
+                <button class="icon-btn" title="Take Snapshot"><i class="fa-solid fa-camera"></i></button>
+
+                <button class="trade-btn">Trade</button>
+                <button class="publish-btn">Publish</button>
+            </div>
+        </header>
+
+        <!-- ================= MAIN BODY CONTAINER ================= -->
+        <div class="tv-body">
+            <!-- LEFT DRAWING TOOLBAR -->
+            <aside class="tv-left-toolbar">
+                <button class="tool-btn active" id="toolCrosshair" data-tool="crosshair" title="Crosshair Mode"><i class="fa-solid fa-plus"></i></button>
+                <button class="tool-btn" id="toolHLine" data-tool="hline" title="Horizontal Price Scale Line"><i class="fa-solid fa-arrows-left-right"></i></button>
+                <button class="tool-btn" id="toolTrendline" data-tool="trendline" title="Trendline"><i class="fa-solid fa-slash"></i></button>
+                <button class="tool-btn position-btn long" id="toolLongPos" data-tool="long_pos" title="Long Position Mapper (Entry / Target / SL)"><i class="fa-solid fa-arrow-trend-up"></i></button>
+                <button class="tool-btn position-btn short" id="toolShortPos" data-tool="short_pos" title="Short Position Mapper (Entry / Target / SL)"><i class="fa-solid fa-arrow-trend-down"></i></button>
+                <button class="tool-btn" id="toolFib" data-tool="fib" title="Fibonacci Retracement"><i class="fa-solid fa-bars-staggered"></i></button>
+                <button class="tool-btn" id="toolRuler" data-tool="ruler" title="Measure / Ruler"><i class="fa-solid fa-ruler-combined"></i></button>
+                <button class="tool-btn" id="toolHideDrawings" title="Hide/Show Drawings"><i class="fa-regular fa-eye"></i></button>
+                <button class="tool-btn danger-btn" id="toolClearDrawings" title="Clear All Drawings & Mappers"><i class="fa-regular fa-trash-can"></i></button>
+                <button class="tool-btn danger-btn" id="leftResetBtn" title="Reset Chart & Indicators"><i class="fa-solid fa-arrows-rotate"></i></button>
+            </aside>
+
+            <!-- MAIN CHART WORKSPACE AREA -->
+            <main class="tv-chart-container" id="chartContainer">
+                <!-- TOP LEFT OVERLAY LEGEND -->
+                <div class="tv-legend" id="tvLegend">
+                    <div class="legend-symbol-line">
+                        <span class="symbol-full-name" id="symbolFullName">Gold Spot / U.S. Dollar</span>
+                        <span class="legend-bullet">•</span>
+                        <span class="legend-tf" id="legendTf">15m</span>
+                        <span class="legend-bullet">•</span>
+                        <span class="broker-tag" id="brokerTag">MULTIBANK</span>
+                        <span class="status-dot green"></span>
+                    </div>
+
+                    <!-- OHLC Realtime Readout -->
+                    <div class="legend-ohlc-line" id="ohlcReadout">
+                        <span class="ohlc-item">O <span class="val" id="valO">0.000</span></span>
+                        <span class="ohlc-item">H <span class="val" id="valH">0.000</span></span>
+                        <span class="ohlc-item">L <span class="val" id="valL">0.000</span></span>
+                        <span class="ohlc-item">C <span class="val" id="valC">0.000</span></span>
+                        <span class="ohlc-change" id="valChange">+0.000 (+0.00%)</span>
+                    </div>
+
+                    <!-- Quick Quote Sell/Buy Box -->
+                    <div class="quick-quote-box">
+                        <button class="quote-sell" id="btnSell">
+                            <span class="price-val" id="quoteSellPrice">4,378.840</span>
+                            <span class="quote-lbl">SELL</span>
+                        </button>
+                        <div class="quote-spread" id="quoteSpread">61.0</div>
+                        <button class="quote-buy" id="btnBuy">
+                            <span class="price-val" id="quoteBuyPrice">4,379.450</span>
+                            <span class="quote-lbl">BUY</span>
+                        </button>
+                    </div>
+
+                    <!-- Active Indicators Legend List -->
+                    <div class="legend-indicators-list" id="indicatorsLegend">
+                        <!-- Dynamic indicator items appended here -->
+                    </div>
+                </div>
+
+                <!-- LIGHTWEIGHT CHARTS CANVAS CONTAINER -->
+                <div class="chart-canvas-wrapper" id="mainChartCanvas">
+                    <!-- SYNCHRONIZED DRAWING OVERLAY CANVAS -->
+                    <canvas id="drawingCanvasOverlay"></canvas>
+                </div>
+                
+                <!-- SUB-CHART CONTAINER FOR OSCILLATORS (RSI / MACD) -->
+                <div class="sub-chart-canvas-wrapper hidden" id="subChartCanvasWrapper">
+                    <div class="sub-chart-header">
+                        <span class="sub-chart-title" id="subChartTitle">RSI (14)</span>
+                        <button class="sub-chart-close" id="closeSubChartBtn" title="Close Sub-chart"><i class="fa-solid fa-xmark"></i></button>
+                    </div>
+                    <div class="sub-chart-canvas" id="subChartCanvas"></div>
+                </div>
+
+                <!-- RIGHT-CLICK CONTEXT MENU -->
+                <div class="tv-context-menu hidden" id="chartContextMenu">
+                    <div class="menu-item danger hidden" id="ctxDeleteSelectedDrawing">
+                        <i class="fa-regular fa-trash-can"></i>
+                        <span id="ctxDeleteSelectedLabel">Delete Drawing</span>
+                    </div>
+                    <div class="menu-item" id="ctxAddHLine">
+                        <i class="fa-solid fa-arrows-left-right"></i>
+                        <span id="ctxAddHLineLabel">Add Price Line @ 0.000</span>
+                    </div>
+                    <div class="menu-item" id="ctxAddLongPos">
+                        <i class="fa-solid fa-arrow-trend-up" style="color:#089981;"></i>
+                        <span id="ctxAddLongPosLabel">Add Long Position Mapper Here</span>
+                    </div>
+                    <div class="menu-item" id="ctxAddShortPos">
+                        <i class="fa-solid fa-arrow-trend-down" style="color:#f23645;"></i>
+                        <span id="ctxAddShortPosLabel">Add Short Position Mapper Here</span>
+                    </div>
+                    <div class="menu-divider"></div>
+                    <div class="menu-item" id="ctxResetView">
+                        <i class="fa-solid fa-arrows-to-eye"></i>
+                        <span>Reset Chart View (Latest Candle)</span>
+                    </div>
+                    <div class="menu-item" id="ctxRemoveIndicators">
+                        <i class="fa-regular fa-trash-can"></i>
+                        <span>Remove All Indicators</span>
+                    </div>
+                    <div class="menu-item danger" id="ctxClearDrawings">
+                        <i class="fa-solid fa-eraser"></i>
+                        <span>Clear All Drawings & Mappers</span>
+                    </div>
+                    <div class="menu-item danger" id="ctxResetAll">
+                        <i class="fa-solid fa-arrows-rotate"></i>
+                        <span>Reset Chart & Indicators</span>
+                    </div>
+                    <div class="menu-divider"></div>
+                    <div class="menu-item" id="ctxFitContent">
+                        <i class="fa-solid fa-expand"></i>
+                        <span>Fit Entire Chart to Screen</span>
+                    </div>
+                    <div class="menu-divider"></div>
+                    <div class="menu-item" id="ctxToggleTheme">
+                        <i class="fa-solid fa-circle-half-stroke"></i>
+                        <span>Toggle Light / Dark Theme</span>
+                    </div>
+                </div>
+
+                <!-- FLOATING DRAWING ACTION TOOLBAR (Selected Tool Quick Bar) -->
+                <div class="floating-drawing-bar hidden" id="floatingDrawingBar">
+                    <span class="bar-title" id="floatingBarTitle">Position Mapper</span>
+                    <button class="bar-btn" id="floatingBarSettingsBtn" title="Settings"><i class="fa-solid fa-gear"></i></button>
+                    <button class="bar-btn danger" id="floatingBarDeleteBtn" title="Delete Drawing"><i class="fa-regular fa-trash-can"></i></button>
+                    <button class="bar-btn" id="floatingBarCloseBtn" title="Deselect"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+
+                <!-- WATERMARK BRANDING -->
+                <div class="tv-watermark">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>TradingView</span>
+                </div>
+            </main>
+
+            <!-- RIGHT SIDEBAR -->
+            <aside class="tv-right-sidebar">
+                <button class="side-btn active" title="Watchlist"><i class="fa-solid fa-list-ul"></i></button>
+                <button class="side-btn" title="Alerts"><i class="fa-regular fa-bell"></i></button>
+                <button class="side-btn" title="Data Window"><i class="fa-solid fa-database"></i></button>
+                <button class="side-btn" title="Hotlist"><i class="fa-solid fa-fire"></i></button>
+                <button class="side-btn" title="Economic Calendar"><i class="fa-regular fa-calendar-days"></i></button>
+                <button class="side-btn" title="My Ideas"><i class="fa-regular fa-lightbulb"></i></button>
+                <button class="side-btn" title="Community Chat"><i class="fa-regular fa-comments"></i></button>
+                <button class="side-btn" title="Notifications"><i class="fa-regular fa-circle-dot"></i></button>
+                <button class="side-btn" title="Object Tree"><i class="fa-solid fa-layer-group"></i></button>
+                <button class="side-btn" title="Settings"><i class="fa-solid fa-sliders"></i></button>
+            </aside>
+        </div>
+
+        <!-- ================= BOTTOM CONTROL FOOTER ================= -->
+        <footer class="tv-footer">
+            <div class="tv-footer-left">
+                <div class="range-selector" id="rangeSelector">
+                    <button class="range-btn" data-range="1D">1D</button>
+                    <button class="range-btn" data-range="5D">5D</button>
+                    <button class="range-btn" data-range="1M">1M</button>
+                    <button class="range-btn" data-range="3M">3M</button>
+                    <button class="range-btn" data-range="6M">6M</button>
+                    <button class="range-btn" data-range="YTD">YTD</button>
+                    <button class="range-btn active" data-range="1Y">1Y</button>
+                    <button class="range-btn" data-range="5Y">5Y</button>
+                    <button class="range-btn" data-range="ALL">ALL</button>
+                    <button class="icon-btn" title="Custom Date Range"><i class="fa-regular fa-calendar"></i></button>
+                </div>
+            </div>
+            <div class="tv-footer-right">
+                <!-- TIMEZONE SELECTOR DROPDOWN -->
+                <div class="tz-selector-container">
+                    <i class="fa-solid fa-globe tz-icon"></i>
+                    <select id="timezoneSelect" class="tz-select" title="Change Chart Timezone">
+                        <option value="UTC">UTC (UTC+00:00)</option>
+                        <option value="UTC+3">UTC+03:00 (MT5 Broker Server)</option>
+                        <option value="UTC+5.5" selected>UTC+05:30 (Kolkata / IST)</option>
+                        <option value="UTC-5">UTC-05:00 (New York / EST)</option>
+                        <option value="UTC+1">UTC+01:00 (London / BST)</option>
+                        <option value="UTC+8">UTC+08:00 (Singapore / HK)</option>
+                        <option value="UTC+9">UTC+09:00 (Tokyo / JST)</option>
+                    </select>
+                </div>
+                
+                <span class="clock-display" id="clockDisplay">00:00:00 UTC+05:30</span>
+                <span class="log-scale-btn">log</span>
+                <span class="auto-scale-btn active">auto</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- ================= INDICATORS MODAL DIALOG ================= -->
+    <div class="modal-overlay hidden" id="indicatorsModal">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3 id="modalHeaderTitle">Indicators & Strategies</h3>
+                <button class="modal-close" id="closeIndicatorsModal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            
+            <div class="modal-body">
+                <div class="search-box" id="modalSearchBox">
+                    <i class="fa-solid fa-magnifying-glass"></i>
+                    <input type="text" id="indicatorSearchInput" placeholder="Search indicators (e.g. Supertrend, SMA, RSI)...">
+                </div>
+
+                <div class="indicators-grid" id="indicatorsListContainer">
+                    <!-- Dynamic Indicator Cards loaded via API -->
+                </div>
+
+                <!-- Selected Indicator Parameter Configuration Panel -->
+                <div class="indicator-config-panel hidden" id="indicatorConfigPanel">
+                    <h4 id="configTitle">Configure Supertrend</h4>
+                    <div class="params-form" id="paramsForm"></div>
+                    <div class="config-actions">
+                        <button class="btn-secondary" id="cancelConfigBtn">Cancel</button>
+                        <button class="btn-primary" id="applyIndicatorBtn">Save & Apply Indicator</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= POSITION MAPPER SETTINGS MODAL ================= -->
+    <div class="modal-overlay hidden" id="positionModal">
+        <div class="modal-card position-modal-card">
+            <div class="modal-header">
+                <h3 id="posModalTitle">Position Mapper Settings</h3>
+                <button class="modal-close" id="closePosModal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <form id="posModalForm" class="params-form">
+                    <div class="form-group">
+                        <label>Position Type</label>
+                        <select id="posTypeSelect" class="input-select">
+                            <option value="long">Long (Buy)</option>
+                            <option value="short">Short (Sell)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Entry Price</label>
+                        <input type="number" step="0.01" id="posEntryInput" placeholder="Entry Price">
+                    </div>
+                    <div class="form-group">
+                        <label>Take Profit (Target Price)</label>
+                        <input type="number" step="0.01" id="posTpInput" placeholder="Take Profit Price">
+                    </div>
+                    <div class="form-group">
+                        <label>Stop Loss (SL Price)</label>
+                        <input type="number" step="0.01" id="posSlInput" placeholder="Stop Loss Price">
+                    </div>
+                    <div class="form-group">
+                        <label>Lot Size / Quantity</label>
+                        <input type="number" step="0.01" id="posLotsInput" value="1.0" placeholder="1.0">
+                    </div>
+                </form>
+                <div class="config-actions">
+                    <button class="btn-secondary" id="cancelPosModal">Cancel</button>
+                    <button class="btn-primary" id="savePosModal">Save Position</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

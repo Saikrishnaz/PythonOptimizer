@@ -1,0 +1,1083 @@
+/* =============================================================================
+   TRADINGVIEW LIGHTWEIGHT CHARTS UI STYLESHEET (MULTIBANK BROKER INTEGRATION)
+   ============================================================================= */
+
+:root {
+    /* Light Theme (Matching reference image.png) */
+    --bg-main: #ffffff;
+    --bg-secondary: #f8f9fd;
+    --bg-hover: #f0f3fa;
+    --border-color: #e0e3eb;
+    --text-color: #131722;
+    --text-muted: #787b86;
+    --accent-blue: #2962ff;
+    --accent-blue-hover: #1e53e5;
+    --up-green: #089981;
+    --down-red: #f23645;
+    --grid-color: #f0f3fa;
+    --card-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+    --font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, "Inter", sans-serif;
+}
+
+body.dark-theme {
+    /* Dark Theme Toggle */
+    --bg-main: #131722;
+    --bg-secondary: #1e222d;
+    --bg-hover: #2a2e39;
+    --border-color: #2a2e39;
+    --text-color: #d1d4dc;
+    --text-muted: #787b86;
+    --grid-color: #1f232f;
+    --card-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: var(--font-family);
+    user-select: none;
+}
+
+body, html {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: var(--bg-main);
+    color: var(--text-color);
+}
+
+.tv-app-container {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+}
+
+/* =============================================================================
+   1. TOP HEADER NAVIGATION
+   ============================================================================= */
+.tv-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 44px;
+    background-color: var(--bg-main);
+    border-bottom: 1px solid var(--border-color);
+    padding: 0 8px;
+    z-index: 10;
+}
+
+.tv-header-left, .tv-header-right {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.loading-spinner {
+    color: var(--accent-blue);
+    font-size: 14px;
+    margin-right: 6px;
+    display: flex;
+    align-items: center;
+}
+
+.loading-spinner.hidden {
+    display: none;
+}
+
+.user-badge {
+    position: relative;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background-color: #8bc34a;
+    color: #fff;
+    font-weight: 700;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.user-badge .badge-count {
+    position: absolute;
+    top: -2px;
+    right: -4px;
+    background-color: #f44336;
+    color: #fff;
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 10px;
+}
+
+.header-divider {
+    width: 1px;
+    height: 20px;
+    background-color: var(--border-color);
+    margin: 0 4px;
+}
+
+.symbol-btn {
+    background: none;
+    border: none;
+    font-weight: 700;
+    font-size: 15px;
+    color: var(--text-color);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.symbol-btn:hover {
+    background-color: var(--bg-hover);
+}
+
+.tf-selector {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.tf-btn {
+    background: none;
+    border: none;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 4px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.tf-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-color);
+}
+
+.tf-btn.active {
+    color: var(--accent-blue);
+    background-color: var(--bg-hover);
+}
+
+.icon-btn {
+    background: none;
+    border: none;
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 6px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.icon-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-color);
+}
+
+.icon-btn.active {
+    color: var(--accent-blue);
+}
+
+.indicators-btn {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.indicators-btn:hover {
+    background-color: var(--bg-hover);
+}
+
+.indicators-btn i.flex-icon {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.layout-title {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+    padding: 4px 8px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.layout-title:hover {
+    background-color: var(--bg-hover);
+}
+
+.trade-btn {
+    background-color: transparent;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 5px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-color);
+    cursor: pointer;
+}
+
+.trade-btn:hover {
+    background-color: var(--bg-hover);
+}
+
+.publish-btn {
+    background-color: var(--accent-blue);
+    border: none;
+    border-radius: 4px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    cursor: pointer;
+}
+
+.publish-btn:hover {
+    background-color: var(--accent-blue-hover);
+}
+
+
+/* =============================================================================
+   2. MAIN BODY LAYOUT (TOOLBAR + CHART + SIDEBAR)
+   ============================================================================= */
+.tv-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    position: relative;
+}
+
+/* LEFT DRAWING TOOLBAR */
+.tv-left-toolbar {
+    width: 44px;
+    background-color: var(--bg-main);
+    border-right: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 0;
+    gap: 2px;
+    z-index: 5;
+}
+
+.tool-btn {
+    width: 32px;
+    height: 32px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tool-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-color);
+}
+
+.tool-btn.active {
+    color: var(--accent-blue);
+    background-color: var(--bg-hover);
+}
+
+.tool-btn.danger-btn:hover {
+    color: var(--down-red);
+    background-color: rgba(242, 54, 69, 0.08);
+}
+
+/* RIGHT SIDEBAR */
+.tv-right-sidebar {
+    width: 44px;
+    background-color: var(--bg-main);
+    border-left: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 4px 0;
+    gap: 4px;
+    z-index: 5;
+}
+
+.side-btn {
+    width: 32px;
+    height: 32px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.side-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-color);
+}
+
+.side-btn.active {
+    color: var(--accent-blue);
+    background-color: var(--bg-hover);
+}
+
+/* MAIN CHART WORKSPACE CONTAINER */
+.tv-chart-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    background-color: var(--bg-main);
+    overflow: hidden;
+}
+
+.chart-canvas-wrapper {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+.sub-chart-canvas-wrapper {
+    height: 180px;
+    width: 100%;
+    border-top: 1px solid var(--border-color);
+    background-color: var(--bg-main);
+    display: flex;
+    flex-direction: column;
+    position: relative;
+}
+
+.sub-chart-canvas-wrapper.hidden {
+    display: none;
+}
+
+.sub-chart-header {
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    border-bottom: 1px dashed var(--border-color);
+}
+
+.sub-chart-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.sub-chart-close:hover {
+    color: var(--down-red);
+}
+
+.sub-chart-canvas {
+    flex: 1;
+    width: 100%;
+}
+
+
+/* =============================================================================
+   3. LEGEND OVERLAY (TOP LEFT OF CHART)
+   ============================================================================= */
+.tv-legend {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 8;
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.legend-symbol-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.symbol-full-name {
+    font-weight: 700;
+    color: var(--text-color);
+    font-size: 14px;
+}
+
+.legend-bullet {
+    color: var(--text-muted);
+}
+
+.legend-tf {
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.broker-tag {
+    font-weight: 700;
+    font-size: 11px;
+    color: var(--accent-blue);
+    background-color: rgba(41, 98, 255, 0.1);
+    padding: 1px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot.green {
+    background-color: var(--up-green);
+    box-shadow: 0 0 6px rgba(8, 153, 129, 0.6);
+}
+
+/* OHLC READOUT */
+.legend-ohlc-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.ohlc-item {
+    color: var(--text-muted);
+}
+
+.ohlc-item .val {
+    color: var(--text-color);
+    font-weight: 600;
+}
+
+.ohlc-change {
+    font-weight: 600;
+    color: var(--down-red);
+}
+
+.ohlc-change.up {
+    color: var(--up-green);
+}
+
+/* QUICK QUOTE SELL/BUY WIDGET */
+.quick-quote-box {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-top: 4px;
+}
+
+.quote-sell {
+    background-color: #fde8ea;
+    border: 1px solid #f9b6bc;
+    border-radius: 4px 0 0 4px;
+    padding: 3px 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.quote-sell .price-val {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--down-red);
+}
+
+.quote-sell .quote-lbl {
+    font-size: 9px;
+    font-weight: 800;
+    color: var(--down-red);
+}
+
+.quote-spread {
+    background-color: var(--bg-hover);
+    border-top: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--border-color);
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--text-muted);
+    padding: 8px 6px;
+}
+
+.quote-buy {
+    background-color: #e3f2fd;
+    border: 1px solid #90caf9;
+    border-radius: 0 4px 4px 0;
+    padding: 3px 8px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+}
+
+.quote-buy .price-val {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent-blue);
+}
+
+.quote-buy .quote-lbl {
+    font-size: 9px;
+    font-weight: 800;
+    color: var(--accent-blue);
+}
+
+/* ACTIVE INDICATORS LIST IN LEGEND */
+.legend-indicators-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 4px;
+}
+
+.ind-legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    background-color: rgba(255, 255, 255, 0.85);
+    padding: 2px 8px;
+    border-radius: 4px;
+    width: fit-content;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+body.dark-theme .ind-legend-item {
+    background-color: rgba(30, 34, 45, 0.85);
+}
+
+.ind-legend-item .ind-title {
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.ind-legend-item .ind-val {
+    font-weight: 700;
+    color: var(--accent-blue);
+    font-family: monospace;
+}
+
+.ind-legend-controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    opacity: 0.7;
+}
+
+.ind-legend-item:hover .ind-legend-controls {
+    opacity: 1;
+}
+
+.ind-icon-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px;
+}
+
+.ind-icon-btn:hover {
+    color: var(--accent-blue);
+}
+
+.ind-icon-btn.remove-btn:hover {
+    color: var(--down-red);
+}
+
+/* =============================================================================
+   RIGHT-CLICK CHART CONTEXT MENU
+   ============================================================================= */
+.tv-context-menu {
+    position: absolute;
+    z-index: 100;
+    min-width: 230px;
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    box-shadow: var(--card-shadow);
+    padding: 6px 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.tv-context-menu.hidden {
+    display: none;
+}
+
+.tv-context-menu .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-color);
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.tv-context-menu .menu-item:hover {
+    background-color: var(--bg-hover);
+    color: var(--accent-blue);
+}
+
+.tv-context-menu .menu-item.danger:hover {
+    color: var(--down-red);
+    background-color: rgba(242, 54, 69, 0.08);
+}
+
+.tv-context-menu .menu-divider {
+    height: 1px;
+    background-color: var(--border-color);
+    margin: 4px 0;
+}
+
+/* WATERMARK */
+.tv-watermark {
+    position: absolute;
+    bottom: 40px;
+    left: 20px;
+    font-size: 24px;
+    font-weight: 800;
+    color: rgba(120, 123, 134, 0.12);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+}
+
+
+/* =============================================================================
+   4. BOTTOM CONTROL FOOTER
+   ============================================================================= */
+.tv-footer {
+    height: 30px;
+    background-color: var(--bg-main);
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 12px;
+    font-size: 12px;
+    z-index: 10;
+}
+
+.range-selector {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.range-btn {
+    background: none;
+    border: none;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.range-btn:hover {
+    color: var(--text-color);
+}
+
+.range-btn.active {
+    color: var(--accent-blue);
+    background-color: var(--bg-hover);
+}
+
+.tv-footer-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.tz-selector-container {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    padding: 1px 6px;
+}
+
+.tz-icon {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.tz-select {
+    background: none;
+    border: none;
+    color: var(--text-color);
+    font-size: 11px;
+    font-weight: 600;
+    outline: none;
+    cursor: pointer;
+}
+
+.clock-display {
+    font-family: monospace;
+}
+
+.log-scale-btn, .auto-scale-btn {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.log-scale-btn.active, .auto-scale-btn.active {
+    color: var(--accent-blue);
+}
+
+
+/* =============================================================================
+   5. INDICATORS MODAL DIALOG
+   ============================================================================= */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+.modal-overlay.hidden {
+    display: none;
+}
+
+.modal-card {
+    width: 580px;
+    max-height: 80vh;
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: var(--card-shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text-color);
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    font-size: 16px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.modal-close:hover {
+    color: var(--text-color);
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.search-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 8px 14px;
+}
+
+.search-box.hidden {
+    display: none;
+}
+
+.search-box i {
+    color: var(--text-muted);
+}
+
+.search-box input {
+    border: none;
+    background: none;
+    width: 100%;
+    outline: none;
+    font-size: 14px;
+    color: var(--text-color);
+}
+
+.indicators-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.indicators-grid.hidden {
+    display: none;
+}
+
+.indicator-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.indicator-card:hover {
+    border-color: var(--accent-blue);
+    background-color: var(--bg-hover);
+}
+
+.indicator-info h5 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-color);
+}
+
+.indicator-info span {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.indicator-card .add-btn {
+    background-color: var(--accent-blue);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.indicator-config-panel {
+    border-top: 1px solid var(--border-color);
+    padding-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.indicator-config-panel.hidden {
+    display: none;
+}
+
+.params-form {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.form-group label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+.form-group input {
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-main);
+    color: var(--text-color);
+    font-size: 13px;
+}
+
+.config-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.btn-secondary {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    color: var(--text-color);
+    padding: 6px 14px;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.btn-primary {
+    background-color: var(--accent-blue);
+    border: none;
+    color: #fff;
+    padding: 6px 16px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+/* =============================================================================
+   6. DRAWING OVERLAY & POSITION MAPPER STYLING
+   ============================================================================= */
+#drawingCanvasOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 6;
+    pointer-events: none !important;
+}
+
+.tool-btn.position-btn.long {
+    color: var(--up-green);
+}
+
+.tool-btn.position-btn.long:hover, .tool-btn.position-btn.long.active {
+    background-color: rgba(8, 153, 129, 0.15);
+    color: var(--up-green);
+}
+
+.tool-btn.position-btn.short {
+    color: var(--down-red);
+}
+
+.tool-btn.position-btn.short:hover, .tool-btn.position-btn.short.active {
+    background-color: rgba(242, 54, 69, 0.15);
+    color: var(--down-red);
+}
+
+.input-select {
+    padding: 6px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-main);
+    color: var(--text-color);
+    font-size: 13px;
+    outline: none;
+}
+
+.position-modal-card {
+    width: 440px;
+}
+
+/* FLOATING MINI ACTION TOOLBAR FOR SELECTED DRAWING */
+.floating-drawing-bar {
+    position: absolute;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+    padding: 3px 10px;
+    pointer-events: auto;
+    transition: opacity 0.15s ease;
+}
+
+.floating-drawing-bar.hidden {
+    display: none;
+}
+
+.floating-drawing-bar .bar-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--text-color);
+    padding: 0 6px;
+    border-right: 1px solid var(--border-color);
+    margin-right: 2px;
+}
+
+.floating-drawing-bar .bar-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 5px 7px;
+    border-radius: 4px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.floating-drawing-bar .bar-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-color);
+}
+
+.floating-drawing-bar .bar-btn.danger:hover {
+    background-color: rgba(242, 54, 69, 0.15);
+    color: var(--down-red);
+}
+
+

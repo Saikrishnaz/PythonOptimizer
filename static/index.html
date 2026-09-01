@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Universal Algo Optimizer — Dashboard</title>
+    <meta name="description" content="Universal Python Algo Optimizer for custom backtesting scripts with Grid, Random, and Bayesian optimization.">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- ================= HEADER ================= -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="header-brand">
+                    <div class="brand-icon"><i class="fa-solid fa-bolt"></i></div>
+                    <div>
+                        <div class="brand-title">Algo Optimizer</div>
+                        <div class="brand-sub">Universal Backtest Engine</div>
+                    </div>
+                </div>
+                <div class="header-divider"></div>
+                <button class="header-nav-btn active" data-view="optimizer" id="navOptimizer">
+                    <i class="fa-solid fa-sliders"></i> Optimizer
+                </button>
+                <button class="header-nav-btn" data-view="results" id="navResults">
+                    <i class="fa-solid fa-chart-bar"></i> Results
+                </button>
+                <button class="header-nav-btn" data-view="history" id="navHistory">
+                    <i class="fa-solid fa-clock-rotate-left"></i> History
+                </button>
+                <button class="header-nav-btn" data-view="saved" id="navSaved">
+                    <i class="fa-solid fa-star"></i> Saved
+                </button>
+                <button class="header-nav-btn" data-view="chart" id="navChart">
+                    <i class="fa-solid fa-chart-line"></i> Chart
+                </button>
+                <button class="header-nav-btn" data-view="walkforward" id="navWalkForward">
+                    <i class="fa-solid fa-forward"></i> Walk-Forward
+                </button>
+            </div>
+            <div class="header-right">
+                <div class="header-status">
+                    <div class="status-dot idle" id="globalStatusDot"></div>
+                    <span id="globalStatusText">Idle</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- ================= BODY ================= -->
+        <div class="app-body">
+            <!-- LEFT SIDEBAR — CONFIGURATION -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <div class="sidebar-title">Configuration</div>
+                </div>
+                <div class="sidebar-body" id="sidebarBody">
+                    <!-- SECTION: Script Selection -->
+                    <div class="sidebar-section">
+                        <div class="section-header" data-section="script">
+                            <span class="section-title"><i class="fa-solid fa-file-code"></i> Script Selection</span>
+                            <i class="fa-solid fa-chevron-down section-arrow"></i>
+                        </div>
+                        <div class="section-body" data-section="script">
+                            <div class="form-group">
+                                <label class="form-label">Backtest Script</label>
+                                <select class="form-select" id="scriptSelect">
+                                    <option value="">— Select a script —</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary btn-full" id="analyzeBtn" disabled>
+                                <i class="fa-solid fa-magnifying-glass-chart"></i> Analyze Script
+                            </button>
+                            <div id="scriptInfo" class="mt-2 text-xs text-muted"></div>
+                        </div>
+                    </div>
+
+                    <!-- SECTION: Optimization Settings -->
+                    <div class="sidebar-section">
+                        <div class="section-header" data-section="optSettings">
+                            <span class="section-title"><i class="fa-solid fa-gear"></i> Optimization Settings</span>
+                            <i class="fa-solid fa-chevron-down section-arrow"></i>
+                        </div>
+                        <div class="section-body" data-section="optSettings">
+                            <div class="form-group">
+                                <label class="form-label">Optimization Mode</label>
+                                <select class="form-select" id="optModeSelect">
+                                    <option value="random">Random Search</option>
+                                    <option value="grid">Grid Search</option>
+                                    <option value="bayesian">Bayesian Optimization</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Iterations</label>
+                                <input type="number" class="form-input" id="iterationsInput" value="100" min="1" max="100000">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Parallel Workers</label>
+                                <input type="number" class="form-input" id="workersInput" value="2" min="1" max="32">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Random Seed</label>
+                                <input type="number" class="form-input" id="seedInput" value="42">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Ranking Metric</label>
+                                <select class="form-select" id="rankingSelect">
+                                    <option value="priority">Priority Score</option>
+                                    <option value="composite">Composite Score</option>
+                                    <option value="net_profit">Net Profit</option>
+                                    <option value="sharpe">Sharpe Ratio</option>
+                                    <option value="profit_factor">Profit Factor</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Top N Results</label>
+                                <input type="number" class="form-input" id="topNInput" value="10" min="1" max="100">
+                            </div>
+                        </div>
+                    </div>
+                    <!-- SECTION: Drawdown Optimization -->
+                    <div class="sidebar-section" id="ddOptSection">
+                        <div class="section-header" data-section="ddOpt">
+                            <i class="fa-solid fa-shield-halved"></i> Drawdown Optimization
+                            <i class="fa-solid fa-chevron-down toggle-icon"></i>
+                        </div>
+                        <div class="section-content" data-section="ddOpt">
+                            <div class="form-group">
+                                <label class="form-label">Mode</label>
+                                <select class="form-select" id="ddOptMode">
+                                    <option value="disabled">Disabled</option>
+                                    <option value="auto">Auto (Recommended)</option>
+                                    <option value="manual">Manual</option>
+                                </select>
+                            </div>
+                            <div id="ddOptAutoInfo" class="dd-opt-info" style="display:none;">
+                                <i class="fa-solid fa-wand-magic-sparkles"></i>
+                                <span>System will auto-detect optimal trade thresholds from your results. No configuration needed.</span>
+                            </div>
+                            <div id="ddOptManualInputs" style="display:none;">
+                                <div class="form-group">
+                                    <label class="form-label">Min Avg Trades/Day</label>
+                                    <input type="number" class="form-input" id="ddMinTpd" value="2" min="0" step="0.5">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Target Avg Trades/Day</label>
+                                    <input type="number" class="form-input" id="ddTargetTpd" value="8" min="0" step="0.5">
+                                </div>
+                            </div>
+                            <div id="ddOptDescription" class="dd-opt-description" style="display:none;">
+                                <small>Prioritizes lowest Max Drawdown among configs meeting the trade activity requirement. Existing ranking metric used as tie-breaker.</small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SECTION: Parameters (dynamic) -->
+                    <div class="sidebar-section" id="paramsSection" style="display:none">
+                        <div class="section-header" data-section="params">
+                            <span class="section-title"><i class="fa-solid fa-table-cells"></i> Parameters <span class="tab-badge" id="paramCount">0</span></span>
+                            <i class="fa-solid fa-chevron-down section-arrow"></i>
+                        </div>
+                        <div class="section-body" data-section="params">
+                            <div id="paramsList" class="param-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- BOTTOM ACTIONS -->
+                <div style="padding: 16px; border-top: 1px solid var(--border-color);">
+                    <div id="optEstimates" class="opt-estimates" style="display:none; margin-bottom: 12px;"></div>
+                    <button class="btn btn-success btn-full" id="startOptBtn" disabled>
+                        <i class="fa-solid fa-rocket"></i> Start Optimization
+                    </button>
+                    <button class="btn btn-danger btn-full mt-2 hidden" id="stopOptBtn">
+                        <i class="fa-solid fa-stop"></i> Stop Optimization
+                    </button>
+                </div>
+            </aside>
+
+            <!-- MAIN CONTENT -->
+            <div class="main-content">
+                <!-- TAB BAR -->
+                <div class="tab-bar" id="tabBar">
+                    <div class="tab-item active" data-tab="progress">
+                        <i class="fa-solid fa-gauge-high"></i> Progress
+                    </div>
+                    <div class="tab-item" data-tab="results">
+                        <i class="fa-solid fa-table"></i> Results <span class="tab-badge" id="resultsBadge">0</span>
+                    </div>
+                    <div class="tab-item" data-tab="chart">
+                        <i class="fa-solid fa-chart-candlestick"></i> Chart View
+                    </div>
+                </div>
+
+                <!-- TAB: PROGRESS -->
+                <div class="tab-content active" data-tab="progress" id="progressTab">
+                    <div id="progressContent">
+                        <div class="empty-state" id="emptyProgress">
+                            <i class="fa-solid fa-satellite-dish"></i>
+                            <h3>No Optimization Running</h3>
+                            <p>Select a backtest script, configure parameters, and hit <strong>Start Optimization</strong> to begin.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: RESULTS -->
+                <div class="tab-content" data-tab="results" id="resultsTab">
+                    <div class="results-container" id="resultsContainer">
+                        <div class="empty-state">
+                            <i class="fa-solid fa-chart-pie"></i>
+                            <h3>No Results Yet</h3>
+                            <p>Results will appear here once an optimization run completes.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: SAVED BACKTESTS -->
+                <div class="tab-content" data-tab="saved" id="savedTab">
+                    <div style="display:flex; height:100%;">
+                        <!-- Left Pane: Groups -->
+                        <div style="width: 250px; background: var(--bg-card); border-right: 1px solid var(--border-color); display:flex; flex-direction:column;">
+                            <div style="padding:16px; border-bottom: 1px solid var(--border-color); display:flex; justify-content:space-between; align-items:center;">
+                                <h3 style="margin:0; font-size:14px; font-weight:600; color:var(--text-heading);">Groups</h3>
+                                <button class="btn btn-secondary btn-sm" onclick="createNewGroup()" title="Create New Group"><i class="fa-solid fa-plus"></i></button>
+                            </div>
+                            <div id="groupsList" style="flex:1; overflow-y:auto; padding:8px;">
+                                <!-- Groups inserted here -->
+                            </div>
+                        </div>
+                        <!-- Right Pane: Backtests -->
+                        <div style="flex:1; display:flex; flex-direction:column; background: var(--bg-main);">
+                            <div style="padding:16px; border-bottom: 1px solid var(--border-color); display:flex; justify-content:space-between; align-items:center;">
+                                <h3 id="currentGroupTitle" style="margin:0; font-size:16px; font-weight:600; color:var(--text-heading);">All Saved</h3>
+                            </div>
+                            <div id="savedBacktestsContainer" style="flex:1; overflow-y:auto; padding:16px; display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:16px; align-content:start;">
+                                <!-- Saved cards inserted here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: CHART VIEW -->
+                <div class="tab-content" data-tab="chart" id="chartTab">
+                    <div class="chart-toolbar" id="chartToolbar">
+                        <div class="chart-info">
+                            <span id="chartSymbolLabel" class="text-sm" style="color: var(--text-heading); font-weight: 600;">No Data</span>
+                            <span id="chartTimeframeLabel" class="text-xs text-muted">—</span>
+                        </div>
+                        <div class="btn-group">
+                            <select class="form-select" id="chartTfSelect" style="width: 80px;">
+                                <option value="1m">1m</option>
+                                <option value="5m">5m</option>
+                                <option value="15m" selected>15m</option>
+                                <option value="30m">30m</option>
+                                <option value="1h">1h</option>
+                                <option value="4h">4h</option>
+                                <option value="1D">1D</option>
+                            </select>
+                            <button class="btn btn-secondary btn-sm" id="chartFitBtn">
+                                <i class="fa-solid fa-expand"></i> Fit
+                            </button>
+                        </div>
+                    </div>
+                    <div class="chart-canvas-wrapper" id="chartCanvasWrapper">
+                        <div id="chartCanvas"></div>
+                    </div>
+                </div>
+
+                <!-- TAB: WALK-FORWARD TESTING -->
+                <div class="tab-content" data-tab="walkforward" id="walkforwardTab">
+                    <div class="wfo-container" id="wfoContainer">
+                        <!-- WFO Config Section -->
+                        <div class="wfo-section" id="wfoConfigSection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-gear"></i> Walk-Forward Configuration</div>
+                            <!-- Compatibility Check -->
+                            <div id="wfoCompat" class="wfo-compat" style="margin-bottom:16px; display:none;"></div>
+                            <!-- Window Mode -->
+                            <div style="margin-bottom:16px;">
+                                <div class="wfo-mode-toggle">
+                                    <button class="wfo-mode-btn active" data-mode="rolling" id="wfoModeRolling">Rolling</button>
+                                    <button class="wfo-mode-btn" data-mode="expanding" id="wfoModeExpanding">Expanding</button>
+                                </div>
+                                <div class="wfo-mode-desc" id="wfoModeDesc">Rolling: IS window slides forward by step size. IS length stays fixed.</div>
+                            </div>
+                            <!-- Config Grid -->
+                            <div class="wfo-config-grid">
+                                <div class="wfo-config-group">
+                                    <label>WFO Start Date</label>
+                                    <input type="date" id="wfoStartDate">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>WFO End Date</label>
+                                    <input type="date" id="wfoEndDate">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>IS Duration (Months)</label>
+                                    <input type="number" id="wfoIsDuration" value="24" min="1" max="120">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>OOS Duration (Months)</label>
+                                    <input type="number" id="wfoOosDuration" value="6" min="1" max="60">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Step Size (Months)</label>
+                                    <input type="number" id="wfoStepSize" value="6" min="1" max="60">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Optimization Method</label>
+                                    <select id="wfoOptMethod">
+                                        <option value="random">Random Search</option>
+                                        <option value="grid">Grid Search</option>
+                                        <option value="bayesian">Bayesian Optimization</option>
+                                    </select>
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Iterations per Step</label>
+                                    <input type="number" id="wfoIterations" value="1000" min="1" max="100000">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Parallel Workers</label>
+                                    <input type="number" id="wfoWorkers" value="2" min="1" max="32">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Ranking Metric</label>
+                                    <select id="wfoRankingMetric">
+                                        <option value="composite">Composite Score</option>
+                                        <option value="priority">Priority Score</option>
+                                        <option value="net_profit">Net Profit</option>
+                                        <option value="sharpe">Sharpe Ratio</option>
+                                        <option value="profit_factor">Profit Factor</option>
+                                    </select>
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Random Seed</label>
+                                    <input type="number" id="wfoSeed" value="42">
+                                </div>
+                            </div>
+                            <!-- WFO Drawdown Optimization -->
+                            <div class="wfo-section-title" style="margin-top:16px;">
+                                <i class="fa-solid fa-shield-halved"></i> Drawdown Optimization
+                            </div>
+                            <div class="wfo-config-grid">
+                                <div class="wfo-config-group" style="grid-column: span 2;">
+                                    <label>Mode</label>
+                                    <select id="wfoDdOptMode">
+                                        <option value="disabled">Disabled</option>
+                                        <option value="auto">Auto (Recommended)</option>
+                                        <option value="manual">Manual</option>
+                                    </select>
+                                </div>
+                                <div id="wfoDdAutoInfo" class="dd-opt-info" style="display:none; grid-column: span 2;">
+                                    <i class="fa-solid fa-wand-magic-sparkles"></i>
+                                    <span>System auto-detects trade thresholds per step.</span>
+                                </div>
+                                <div id="wfoDdManualInputs" style="display:none; grid-column: span 2;">
+                                    <div class="wfo-config-grid">
+                                        <div class="wfo-config-group">
+                                            <label>Min Trades/Day</label>
+                                            <input type="number" id="wfoDdMinTpd" value="2" min="0" step="0.5">
+                                        </div>
+                                        <div class="wfo-config-group">
+                                            <label>Target Trades/Day</label>
+                                            <input type="number" id="wfoDdTargetTpd" value="8" min="0" step="0.5">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="wfo-actions">
+                                <div id="wfoEstimates" class="opt-estimates" style="display:none;"></div>
+                                <button class="btn btn-primary" id="wfoPreviewBtn" disabled>
+                                    <i class="fa-solid fa-eye"></i> Generate Windows
+                                </button>
+                                <button class="btn btn-success" id="wfoStartBtn" disabled>
+                                    <i class="fa-solid fa-rocket"></i> Start Walk-Forward
+                                </button>
+                                <button class="btn btn-danger hidden" id="wfoStopBtn">
+                                    <i class="fa-solid fa-stop"></i> Stop
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Window Preview -->
+                        <div class="wfo-section" id="wfoPreviewSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-table-columns"></i> Window Preview</div>
+                            <div id="wfoPreviewContent"></div>
+                        </div>
+
+                        <!-- Progress -->
+                        <div class="wfo-section" id="wfoProgressSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-gauge-high"></i> Execution Progress</div>
+                            <div id="wfoProgressContent"></div>
+                        </div>
+
+                        <!-- Step Results -->
+                        <div class="wfo-section" id="wfoStepsSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-list-check"></i> Step Results</div>
+                            <div style="overflow-x:auto;" id="wfoStepsContent"></div>
+                        </div>
+
+                        <!-- OOS Summary -->
+                        <div class="wfo-section" id="wfoSummarySection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-chart-pie"></i> Combined OOS Performance</div>
+                            <div id="wfoSummaryContent"></div>
+                        </div>
+
+                        <!-- Robustness -->
+                        <div class="wfo-section" id="wfoRobustnessSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-shield-halved"></i> Robustness Assessment</div>
+                            <div id="wfoRobustnessContent"></div>
+                        </div>
+
+                        <!-- Parameter Stability -->
+                        <div class="wfo-section" id="wfoStabilitySection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-wave-square"></i> Parameter Stability</div>
+                            <div style="overflow-x:auto;" id="wfoStabilityContent"></div>
+                        </div>
+
+                        <!-- Candidates -->
+                        <div class="wfo-section" id="wfoCandidatesSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-bullseye"></i> Candidate Parameters</div>
+                            <div id="wfoCandidatesContent"></div>
+                        </div>
+
+                        <!-- Full-Sample Comparison -->
+                        <div class="wfo-section" id="wfoFullSampleSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-scale-balanced"></i> Full-Sample Comparison</div>
+                            <div class="wfo-full-sample-warning">
+                                <i class="fa-solid fa-triangle-exclamation"></i>
+                                <span class="text">FULL-SAMPLE ANALYSIS — NOT OOS VALIDATION. These results include data the strategy was trained on.</span>
+                            </div>
+                            <div id="wfoFullSampleContent"></div>
+                        </div>
+
+                        <!-- Export -->
+                        <div class="wfo-section" id="wfoExportSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-download"></i> Export</div>
+                            <div class="wfo-export-bar" id="wfoExportBar"></div>
+                        </div>
+
+                        <!-- WFO History -->
+                        <div class="wfo-section" id="wfoHistorySection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-clock-rotate-left"></i> Walk-Forward History</div>
+                            <div id="wfoHistoryContent"></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= BATCH DETAIL MODAL ================= -->
+    <div class="modal-overlay" id="batchModal">
+        <div class="modal-card" style="max-width: 900px;">
+            <div class="modal-header">
+                <span class="modal-title" id="batchModalTitle">Batch Details</span>
+                <button class="modal-close" id="closeBatchModal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" id="batchModalBody">
+                <!-- Dynamic batch details -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="batchViewChartBtn">
+                    <i class="fa-solid fa-chart-line"></i> View on Chart
+                </button>
+                <button class="btn btn-secondary" id="batchCloseBtnFooter">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ================= OPTIMIZATIONS HISTORY MODAL ================= -->
+    <div class="modal-overlay" id="historyModal">
+        <div class="modal-card" style="max-width: 700px;">
+            <div class="modal-header">
+                <span class="modal-title">Optimization History</span>
+                <button class="modal-close" id="closeHistoryModal"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body">
+                <div id="historyList" class="opt-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST CONTAINER -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Excel Viewer Modal -->
+    <div class="modal-overlay" id="excelModal">
+        <div class="modal-card" style="max-width:95vw; height:90vh; display:flex; flex-direction:column; padding:0;">
+            <div class="modal-header" style="padding:16px; border-bottom:1px solid var(--border-color); display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0; font-size:18px; color:var(--text-heading);"><i class="fa-solid fa-file-excel" style="color:#10b981; margin-right:8px;"></i>Excel Report Viewer</h3>
+                <button class="modal-close" onclick="closeExcelModal()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="excelTabs" class="excel-tabs" style="display:flex; border-bottom:1px solid var(--border-color); background:var(--bg-panel); overflow-x:auto;">
+                <!-- Tabs inserted dynamically -->
+            </div>
+            <div id="excelContent" class="excel-content" style="flex:1; overflow:auto; padding:0; background:var(--bg-main);">
+                <!-- Table inserted dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Save Backtest Modal -->
+    <div class="modal-overlay" id="saveModal">
+        <div class="modal-card" style="max-width:500px; display:flex; flex-direction:column; padding:0;">
+            <div class="modal-header" style="padding:16px; border-bottom:1px solid var(--border-color); display:flex; justify-content:space-between; align-items:center;">
+                <h3 style="margin:0; font-size:18px; color:var(--text-heading);"><i class="fa-solid fa-star" style="color:var(--accent-yellow); margin-right:8px;"></i>Save Backtest</h3>
+                <button class="modal-close" onclick="closeSaveModal()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div style="padding:16px; background:var(--bg-main);">
+                <input type="hidden" id="saveOptId">
+                <input type="hidden" id="saveBatchId">
+                
+                <label style="display:block; margin-bottom:8px; font-weight:600; color:var(--text-heading);">Group</label>
+                <div style="display:flex; gap:8px; margin-bottom:16px;">
+                    <select id="saveGroupSelect" class="form-input" style="flex:1;">
+                        <option value="">Select Existing Group...</option>
+                        <!-- Populated dynamically -->
+                    </select>
+                    <input type="text" id="saveGroupNew" class="form-input" placeholder="Or create new..." style="flex:1;">
+                </div>
+                
+                <label style="display:block; margin-bottom:8px; font-weight:600; color:var(--text-heading);">Review / Notes</label>
+                <textarea id="saveReview" class="form-input" rows="4" placeholder="Why is this a good backtest?"></textarea>
+                
+                <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
+                    <button class="btn btn-secondary" onclick="closeSaveModal()">Cancel</button>
+                    <button class="btn btn-success" onclick="submitSaveBacktest()"><i class="fa-solid fa-save"></i> Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
