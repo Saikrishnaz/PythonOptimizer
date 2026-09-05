@@ -254,6 +254,7 @@ def default_records():
         "ohlc_exit": {"open": None, "high": None, "low": None, "close": None},
         "expiry_date": {"current_expiry": None, "next_expiry": None, "far_expiry": None, "trade_expiry": None},
         "rolled_from_0dte": False,
+        "synthetic_legs": "",       # "short" / "long" / "short+long" when a leg was priced from intrinsic
         "credit_spread": {
             "entry": None,
             "exit1": None, "exit1_time": None, "exit1_qty": None, "exit1_short": None, "exit1_long": None,
@@ -1250,6 +1251,19 @@ class CREDITSPREAD(Strategy):
     #             and strike — works exactly when the option file has no valid
     #             print (crash days). Every adjustment is logged and counted.
     exit_sanity_gate = "off"
+    # ---- CONFIG SWITCH: missing option files ---------------------------------
+    # "skip"      (default, unchanged): entry skipped, logged `option_file_missing`.
+    # "intrinsic": a leg whose file is missing/empty is priced from spot for the
+    #             whole life of the trade as max(intrinsic, 0.05) at each 1-min
+    #             close — NO time value. Entry, exits, targets and the audit
+    #             then run on that synthetic series unchanged. The trade is
+    #             tagged `synthetic_legs` (short / long / both) in the report
+    #             and logged `synthetic_leg_intrinsic` in Skipped Entries, so
+    #             its P&L can be examined separately. Meant for diagnosis, not
+    #             for reported results: an OTM leg is worth 0.05 under this
+    #             rule, so a synthetic SHORT leg gives almost no credit and a
+    #             synthetic LONG leg costs almost nothing.
+    missing_option_pricing = "skip"
     exit_gate_adjustments = 0
     exit_gate_inr = 0.0
     hedges_allowed = True             # False -> never open the 15:25 overnight hedge
@@ -1474,6 +1488,7 @@ class CREDITSPREAD(Strategy):
                 "sizing_mode": self.current_trade.get("sizing_mode"),
                 "spread_type": self.spread_type,
                 "net_premium": credit_entry,   # +credit received / -debit paid (per unit)
+                "synthetic_legs": self.current_trade.get("synthetic_legs", ""),
             })
 
         if self.compound_capital:
@@ -1623,6 +1638,19 @@ class CREDITSPREAD(Strategy):
 
     def _expiry_exit_time(self):
         return self._before_halt(self.exit_time)
+
+    def _synthetic_option_df(self, option_type, strike):
+        """1-min option series built from the spot closes: max(intrinsic, 0.05).
+        Same columns as a parsed option file so every fill routine works."""
+        if self.spot_m1_ts is None or self.spot_m1_close is None:
+            return None
+        spot = np.asarray(self.spot_m1_close, dtype=float)
+        intr = np.maximum(spot - float(strike), 0.0) if str(option_type).upper() == "CE" else np.maximum(float(strike) - spot, 0.0)
+        px = np.maximum(intr, 0.05)
+        ts = pd.to_datetime(self.spot_m1_ts)
+        return pd.DataFrame({"Date": ts.strftime("%Y%m%d"), "Time": ts.strftime("%H:%M"),
+                             "Open": px, "High": px, "Low": px, "Close": px,
+                             "Volume": 0, "IO": 0, "timestamp": ts})
 
     def _spot_close_at(self, ts):
         """1-min spot close of the bar containing ts (None if no spot data)."""
@@ -2279,20 +2307,33 @@ class CREDITSPREAD(Strategy):
         SHORT_FILE = os.path.join(self.OPTIONS_PATH, SHORT_KEY + ".parquet")
         LONG_FILE = os.path.join(self.OPTIONS_PATH, LONG_KEY + ".parquet")
 
-        if not os.path.exists(SHORT_FILE) or not os.path.exists(LONG_FILE):
+        synth = []   # legs priced from intrinsic because their file is missing/empty
+        short_missing = not os.path.exists(SHORT_FILE)
+        long_missing = not os.path.exists(LONG_FILE)
+        if (short_missing or long_missing) and self.missing_option_pricing != "intrinsic":
             self._log_skip(trigger_ts, "option_file_missing", f"{SHORT_KEY} / {LONG_KEY}")
             self.current_trade = default_records()
             return
 
         try:
-            SHORT_DF = pd.read_parquet(SHORT_FILE)
-            SHORT_DF.columns = ["Date", "Time", "Open", "High", "Low", "Close", "Volume", "IO"]
-            LONG_DF = pd.read_parquet(LONG_FILE)
-            LONG_DF.columns = ["Date", "Time", "Open", "High", "Low", "Close", "Volume", "IO"]
-            for D in (SHORT_DF, LONG_DF):
+            def _load(path):
+                D = pd.read_parquet(path)
+                D.columns = ["Date", "Time", "Open", "High", "Low", "Close", "Volume", "IO"]
                 D["timestamp"] = pd.to_datetime(D["Date"].astype(str) + " " + D["Time"].astype(str),
                                                 format="%Y%m%d %H:%M")
                 D.sort_values(by="timestamp", inplace=True)
+                return D
+            SHORT_DF = None if short_missing else _load(SHORT_FILE)
+            LONG_DF = None if long_missing else _load(LONG_FILE)
+            if self.missing_option_pricing == "intrinsic":
+                if SHORT_DF is None or SHORT_DF.empty:
+                    SHORT_DF = self._synthetic_option_df(self.current_trade["option_type"], short_strike); synth.append("short")
+                if LONG_DF is None or LONG_DF.empty:
+                    LONG_DF = self._synthetic_option_df(self.current_trade["option_type"], long_strike); synth.append("long")
+                if SHORT_DF is None or LONG_DF is None:
+                    self._log_skip(trigger_ts, "option_file_missing", f"{SHORT_KEY} / {LONG_KEY} (no spot series to synthesise)")
+                    self.current_trade = default_records()
+                    return
             if SHORT_DF.empty or LONG_DF.empty:
                 self._log_skip(trigger_ts, "option_file_empty", f"{SHORT_KEY} / {LONG_KEY}")
                 self.current_trade = default_records()
@@ -2387,6 +2428,13 @@ class CREDITSPREAD(Strategy):
 
         self.current_trade["structural_max_loss_inr"] = structural_loss_lot * lots_to_trade
         self.current_trade["sizing_mode"] = sizing_mode
+        self.current_trade["synthetic_legs"] = "+".join(synth) if synth else ""
+        if synth:
+            self._log_skip(trigger_ts, "synthetic_leg_intrinsic",
+                           f"pos {self.current_trade['position_id']} {self.current_trade['entry_type']}: "
+                           f"{' & '.join(synth)} leg(s) priced from intrinsic (file missing: "
+                           f"{SHORT_KEY if 'short' in synth else ''}{' / ' if len(synth) == 2 else ''}{LONG_KEY if 'long' in synth else ''}); "
+                           f"entry short {short_opt_entry_price:.2f} long {long_opt_entry_price:.2f} credit {initial_credit:.2f}")
 
         self.current_trade["eff_lot_size"] = eff_lot
         self.current_trade["lots"] = lots_to_trade
@@ -3008,6 +3056,7 @@ def main(symbol="NIFTY", step_size=None, Options_dir_Path="", Spot_data_path="",
          max_fill_gap_minutes=FILL_MAX_GAP_MINUTES,  # at/after fills must print within N min same day; 0 = unbounded (legacy)
          flip_exit_mode="breakout",        # "breakout" (unchanged: close+reverse at flip-candle breakout) | "immediate" (close 1 min after flip, re-enter on breakout)
          exit_sanity_gate="off",           # "off" (unchanged) | "intrinsic" = floor exit legs at intrinsic, clip spread to structural range
+         missing_option_pricing="skip",    # "skip" (unchanged) | "intrinsic" = price a missing leg from spot intrinsic (diagnostic; tagged + logged)
          session_halt_mode="off",          # "off" (unchanged) | "halt" = freeze evaluation | "close" = square off at start, then freeze
          session_halt_start=None,          # e.g. dtime(15, 15); None -> 15:15
          session_halt_end=None,            # e.g. dtime(9, 20);  None -> 09:20 (next day when start > end)
@@ -3176,6 +3225,13 @@ def main(symbol="NIFTY", step_size=None, Options_dir_Path="", Spot_data_path="",
     if _eg not in ("off", "intrinsic"):
         raise ValueError(f"exit_sanity_gate must be 'off' or 'intrinsic', got {exit_sanity_gate!r}")
     CREDITSPREAD.exit_sanity_gate = _eg
+    _mp = str(missing_option_pricing or "skip").strip().lower()
+    if _mp not in ("skip", "intrinsic"):
+        raise ValueError(f"missing_option_pricing must be 'skip' or 'intrinsic', got {missing_option_pricing!r}")
+    CREDITSPREAD.missing_option_pricing = _mp
+    if _mp == "intrinsic":
+        print("Missing option files: legs priced from spot intrinsic (max(intrinsic, 0.05), no time value). "
+              "Positions tagged `synthetic_legs`; see Skipped Entries reason `synthetic_leg_intrinsic`. DIAGNOSTIC ONLY.")
     CREDITSPREAD.exit_gate_adjustments = 0
     CREDITSPREAD.exit_gate_inr = 0.0
     print("Exit sanity gate: " + ("OFF — exits booked at raw option prints" if _eg == "off"
@@ -3438,6 +3494,7 @@ def main(symbol="NIFTY", step_size=None, Options_dir_Path="", Spot_data_path="",
         'trading_capital_at_entry': 'first',
         'reason_for_exit': 'last',
         'rolled_from_0dte': 'first',
+        'synthetic_legs': 'first',
         'structural_max_loss_inr': 'first',
         'sizing_mode': 'first',
         'spread_type': 'first',
@@ -3604,6 +3661,12 @@ def main(symbol="NIFTY", step_size=None, Options_dir_Path="", Spot_data_path="",
     extra_metrics["Near Skip 0DTE (1=Yes)"] = 1.0 if CREDITSPREAD.near_skip_0dte else 0.0
     extra_metrics["End Of Data Forced Exits"] = int((grouped_df["reason_for_exit"] == "End of Data (forced)").sum())
     extra_metrics["Entries Rolled From 0DTE"] = int(grouped_df["rolled_from_0dte"].fillna(False).astype(bool).sum())
+    extra_metrics["Missing Option Pricing (0=skip, 1=intrinsic)"] = 1.0 if CREDITSPREAD.missing_option_pricing == "intrinsic" else 0.0
+    _syn = grouped_df["synthetic_legs"].fillna("").astype(str) != ""
+    extra_metrics["Synthetic-Leg Positions"] = int(_syn.sum())
+    extra_metrics["Synthetic-Leg Net PnL (INR)"] = float(grouped_df.loc[_syn, "profit_with_hedges_inr"].sum()) if _syn.any() else 0.0
+    extra_metrics["Synthetic-Leg Net Points Per Unit"] = float(grouped_df.loc[_syn, "profit_with_hedges_points"].sum()) if _syn.any() else 0.0
+    extra_metrics["Real-Leg Net Points Per Unit"] = float(grouped_df.loc[~_syn, "profit_with_hedges_points"].sum())
     extra_metrics["Skipped Entries"] = len(CREDITSPREAD.skipped_log)
     # Hedge audit: overnight carries vs hedges actually opened. Previous runs
     # showed 800+ overnight positions and ZERO hedges — that is a broken run,
@@ -3670,7 +3733,7 @@ def main(symbol="NIFTY", step_size=None, Options_dir_Path="", Spot_data_path="",
             "lots", "lot_size", "margin_per_lot", "span_margin", "exposure_margin", "premium_received",
             "capital_used", "trading_capital_at_entry", 
             "exit_time", "exit_qty", "short_exit_price", "long_exit_price", "short_points", "long_points", "profit_in_inr",
-            "structural_max_loss_inr", "sizing_mode", "spread_type", "net_premium"
+            "structural_max_loss_inr", "sizing_mode", "spread_type", "net_premium", "synthetic_legs"
         ]
         trades_df[detailed_cols].to_excel(writer, sheet_name="Detailed Options", index=False)
         
@@ -3884,6 +3947,7 @@ if __name__ == "__main__":
                                             # Expiry-day / intraday exits that fall inside the window are pulled to 1 min before it.
         flip_exit_mode="breakout",    # "breakout" (as before) | "immediate": exit 1 min after the flip, opposite entry only on breakout
         exit_sanity_gate="off",       # "off" (as before) | "intrinsic": exit legs floored at intrinsic value, spread clipped to [0, width]
+        missing_option_pricing="skip",  # "skip" (as before) | "intrinsic": price missing legs from spot intrinsic — diagnostic, tagged in report
         max_fill_gap_minutes=5,       # LOOKAHEAD BOUND: at/after fills (entry, SL, flip, targets) must print within 5 min same day;
                                       # else entry skipped / exit at last pre-trigger mark / partial at detection mark. 0 = old unbounded.
         targets_credit_spread={
