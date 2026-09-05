@@ -1733,6 +1733,16 @@ document.addEventListener('DOMContentLoaded', () => {
             viewBatchChart(optId, batchId);
         };
 
+        // The parameters are already in hand, so copying needs no extra request.
+        const copyBtn = document.getElementById('batchCopyParamsBtn');
+        if (copyBtn) {
+            const params = data.params || {};
+            const n = Object.keys(params).length;
+            copyBtn.disabled = n === 0;
+            copyBtn.onclick = () => copyToClipboard(
+                JSON.stringify(params, null, 2), `${n} parameters copied`);
+        }
+
         // Reuse the already-fetched payload instead of re-requesting the batch.
         const loadBtn = document.getElementById('batchLoadBtn');
         if (loadBtn) {
