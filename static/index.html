@@ -232,6 +232,16 @@
                         <div style="flex:1; display:flex; flex-direction:column; background: var(--bg-main);">
                             <div style="padding:16px; border-bottom: 1px solid var(--border-color); display:flex; justify-content:space-between; align-items:center;">
                                 <h3 id="currentGroupTitle" style="margin:0; font-size:16px; font-weight:600; color:var(--text-heading);">All Saved</h3>
+                                <div class="btn-group">
+                                    <button class="btn btn-secondary btn-sm" id="shareGroupBtn" type="button" disabled
+                                            title="Copy a link that reopens this folder">
+                                        <i class="fa-solid fa-link"></i> Copy Link
+                                    </button>
+                                    <button class="btn btn-primary btn-sm" id="compareGroupBtn" type="button" disabled
+                                            title="Open every optimization in this folder together in the Results tab">
+                                        <i class="fa-solid fa-layer-group"></i> Compare All
+                                    </button>
+                                </div>
                             </div>
                             <div id="savedBacktestsContainer" style="flex:1; overflow-y:auto; padding:16px; display:grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap:16px; align-content:start;">
                                 <!-- Saved cards inserted here -->
@@ -464,6 +474,9 @@
                 <button class="btn btn-secondary" id="batchViewChartBtn">
                     <i class="fa-solid fa-chart-line"></i> View on Chart
                 </button>
+                <button class="btn btn-primary" id="batchLoadBtn">
+                    <i class="fa-solid fa-pen-to-square"></i> Load into Optimizer
+                </button>
                 <button class="btn btn-secondary" id="batchCloseBtnFooter">Close</button>
             </div>
         </div>
@@ -523,6 +536,16 @@
                 
                 <label style="display:block; margin-bottom:8px; font-weight:600; color:var(--text-heading);">Review / Notes</label>
                 <textarea id="saveReview" class="form-input" rows="4" placeholder="Why is this a good backtest?"></textarea>
+
+                <div id="saveParamsBlock" class="hidden" style="margin-top:16px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; gap:8px;">
+                        <label style="font-weight:600; color:var(--text-heading);">Parameters <span id="saveParamsCount" style="font-weight:400; color:var(--text-muted);"></span></label>
+                        <button class="btn btn-secondary btn-sm" id="copyParamsBtn" type="button">
+                            <i class="fa-solid fa-copy"></i> Copy All
+                        </button>
+                    </div>
+                    <pre id="saveParamsPreview" class="params-preview"></pre>
+                </div>
                 
                 <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:16px;">
                     <button class="btn btn-secondary" onclick="closeSaveModal()">Cancel</button>
