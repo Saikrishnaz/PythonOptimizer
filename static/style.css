@@ -735,6 +735,261 @@ html, body {
     color: var(--text-muted);
 }
 
+/* =============================================================================
+   RESULTS: run switcher (show one run, or tick several to compare)
+   ============================================================================= */
+/* One compact row whatever the run count; the list scrolls inside a dropdown. */
+.run-picker {
+    position: relative;
+    display: inline-block;
+    padding: 0 0 10px;
+}
+
+.run-picker-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    color: var(--text-body);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s;
+}
+
+.run-picker-btn:hover { border-color: var(--accent-blue); }
+.run-picker-btn > .fa-layer-group { color: var(--accent-blue); }
+.run-picker-current { color: var(--text-heading); font-weight: 600; }
+
+.run-picker-count {
+    background: var(--bg-input);
+    color: var(--text-muted);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.run-picker-menu {
+    position: absolute;
+    top: calc(100% - 4px);
+    left: 0;
+    z-index: 60;
+    min-width: 380px;
+    max-width: 520px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    overflow: hidden;
+}
+
+.run-picker-head {
+    padding: 8px 12px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-color);
+}
+
+.run-picker-list {
+    max-height: 320px;
+    overflow-y: auto;
+}
+
+.run-option {
+    display: grid;
+    grid-template-columns: auto 110px 1fr auto auto;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 12px;
+    cursor: pointer;
+    font-size: 11px;
+    border-left: 2px solid transparent;
+}
+
+.run-option:hover { background: var(--bg-secondary); }
+.run-option.active {
+    background: var(--accent-blue-glow);
+    border-left-color: var(--accent-blue);
+}
+
+.run-option input { cursor: pointer; margin: 0; }
+
+.run-option-when {
+    color: var(--text-heading);
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.run-option-name {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.run-option-meta {
+    color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+}
+
+.run-option-status {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.results-table .run-cell {
+    font-size: 11px;
+    color: var(--accent-blue);
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* =============================================================================
+   MULTI-RUN: toolbar, per-run actions, queue
+   ============================================================================= */
+.runs-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 16px 16px 0;
+    padding: 10px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius, 6px);
+}
+
+.runs-toolbar-info {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.runs-toolbar-info span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.runs-toolbar-info strong { color: var(--text-heading); }
+
+.runs-toolbar-limit {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.runs-warn { color: var(--yellow); }
+.runs-warn strong { color: var(--yellow); }
+
+.runs-warn-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 16px 0;
+    padding: 8px 14px;
+    font-size: 11px;
+    color: var(--text-body);
+    background: var(--yellow-bg);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: var(--border-radius, 6px);
+}
+
+.runs-warn-banner i { color: var(--yellow); }
+
+.progress-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.p-status-pill {
+    margin-left: 8px;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    text-transform: uppercase;
+    font-weight: 600;
+}
+
+.queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.queue-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+}
+
+.queue-pos {
+    flex: 0 0 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--bg-input);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.queue-meta { flex: 1; min-width: 0; }
+
+.queue-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-heading);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.queue-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+/* Full parameter set shown in the review modal, ready to copy */
+.params-preview {
+    max-height: 220px;
+    overflow: auto;
+    margin: 0;
+    padding: 10px 12px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius, 6px);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--text-body);
+    white-space: pre;
+    tab-size: 2;
+}
+
 /* Resume prompt shown when a run stopped part-way through */
 .resume-banner {
     display: flex;
@@ -919,6 +1174,235 @@ html, body {
 .opt-card-status.stopping { background: var(--yellow-bg); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
 .opt-card-status.interrupted { background: var(--yellow-bg); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
 .opt-card-status.resuming { background: var(--accent-blue-glow); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
+.opt-card-status.queued { background: var(--yellow-bg); color: var(--yellow); border: 1px solid rgba(245,158,11,0.3); }
+
+/* =============================================================================
+   MOBILE / TABLET  (<= 900px)
+   =============================================================================
+   Everything here lives inside media queries, so desktop and laptop rendering
+   is byte-for-byte what it was.
+
+   The dashboard is built as a fixed-viewport app: html/body are locked with
+   `overflow: hidden`, and .app-body is a row holding a 340px sidebar that
+   cannot shrink. On a ~400px-wide phone that leaves the main content pushed
+   off-screen with no way to scroll to it — which is why the tab bar, progress
+   panel and Stop button were unreachable. Below, the shell becomes a single
+   scrolling column.
+   ============================================================================= */
+@media (max-width: 900px) {
+
+    /* Let the page scroll. Without this nothing below the fold is reachable. */
+    html, body {
+        height: auto;
+        min-height: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    .app-container {
+        height: auto;
+        min-height: 100vh;
+    }
+
+    /* ---- Header ------------------------------------------------------------
+       The fixed 56px height clipped the two-line brand, and the nav row
+       overflowed with no way to reach History / Saved / Walk-Forward. */
+    .app-header {
+        height: auto;
+        min-height: var(--header-height);
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 8px 12px;
+        position: sticky;
+        top: 0;
+    }
+
+    .header-left {
+        width: 100%;
+        gap: 8px;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .header-left::-webkit-scrollbar { display: none; }
+
+    .header-brand { flex: 0 0 auto; }
+    .brand-title { font-size: 14px; white-space: nowrap; }
+    .brand-sub, .header-divider { display: none; }
+    .header-nav-btn { flex: 0 0 auto; white-space: nowrap; }
+
+    .header-right {
+        width: 100%;
+        justify-content: flex-end;
+        margin-top: 2px;
+    }
+
+    /* ---- Shell: sidebar above content, both full width ---------------------- */
+    .app-body {
+        flex-direction: column;
+        overflow: visible;
+    }
+
+    .sidebar {
+        width: 100%;
+        flex: 0 0 auto;
+        /* Capped so the Progress panel sits just below rather than a full
+           screen of form fields away; the config scrolls inside itself. */
+        max-height: 52vh;
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+        transition: none;
+    }
+
+    .sidebar-body { min-height: 0; }
+
+    .main-content {
+        overflow: visible;
+        min-height: 60vh;
+    }
+
+    .tab-content.active { overflow: visible; }
+
+    /* Tabs scroll sideways instead of running off the screen edge. */
+    .tab-bar {
+        overflow-x: auto;
+        padding: 0 8px;
+        scrollbar-width: none;
+    }
+    .tab-bar::-webkit-scrollbar { display: none; }
+    .tab-item { flex: 0 0 auto; }
+
+    /* Once the flex chain stops bounding heights, the canvas needs its own. */
+    .chart-container { min-height: 55vh; }
+    .chart-toolbar { flex-wrap: wrap; gap: 8px; }
+
+    /* ---- Progress + queue --------------------------------------------------- */
+    .progress-panel { margin: 10px; padding: 14px; }
+
+    .progress-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+    }
+
+    .progress-stats {
+        width: 100%;
+        gap: 0;
+        justify-content: space-between;
+    }
+
+    /* Stop / View Results were overflowing the panel edge. */
+    .progress-actions { flex-wrap: wrap; }
+
+    .runs-toolbar {
+        margin: 10px 10px 0;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+    }
+    .runs-toolbar-info { gap: 6px 14px; }
+    .runs-warn-banner { margin: 8px 10px 0; }
+    .queue-item { flex-wrap: wrap; }
+    .queue-meta { flex: 1 1 55%; }
+
+    /* ---- Results ------------------------------------------------------------ */
+    .results-container { padding: 10px; }
+
+    /* The dropdown was 380px wide — wider than the viewport. */
+    .run-picker { width: 100%; }
+    .run-picker-btn { width: 100%; justify-content: flex-start; }
+    .run-picker-menu {
+        min-width: 0;
+        width: 100%;
+        max-width: none;
+    }
+    .run-option {
+        grid-template-columns: auto 1fr auto auto;
+        gap: 8px;
+    }
+    .run-option-name { display: none; }
+
+    /* ---- Parameter cards ---------------------------------------------------- */
+    .param-range-row { grid-template-columns: 1fr 1fr; }
+
+    /* ---- History cards ------------------------------------------------------ */
+    .opt-card-meta { flex-wrap: wrap; gap: 6px 14px; }
+    .opt-card-actions { flex-wrap: wrap; }
+
+    /* ---- Modals -------------------------------------------------------------
+       Several modal cards carry an inline max-width in the markup (900px,
+       700px, 500px, 95vw). Inline styles beat media queries, so !important is
+       what makes the mobile width actually apply. Scoped to this breakpoint,
+       so desktop keeps its per-modal widths exactly as authored. */
+    .modal-card {
+        width: 96%;
+        max-width: none !important;
+        max-height: 92vh;
+    }
+    .modal-header, .modal-body, .modal-footer {
+        padding-left: 14px;
+        padding-right: 14px;
+    }
+    .modal-footer { flex-wrap: wrap; }
+    .modal-footer .btn { flex: 1 1 auto; justify-content: center; }
+    .batch-detail-grid { grid-template-columns: 1fr; }
+
+    /* ---- Walk-forward ------------------------------------------------------- */
+    .wfo-progress-detail { grid-template-columns: repeat(2, 1fr); }
+
+    /* Anchored to the bottom, clear of the taller wrapped header. */
+    .toast-container {
+        top: auto;
+        bottom: 16px;
+        left: 12px;
+        right: 12px;
+    }
+}
+
+/* =============================================================================
+   PHONES  (<= 560px) — tighter still
+   ============================================================================= */
+@media (max-width: 560px) {
+
+    /* Icon only; the wordmark costs a nav button's worth of width. */
+    .brand-title { display: none; }
+
+    .header-nav-btn {
+        padding: 6px 10px;
+        font-size: 11px;
+    }
+
+    .sidebar { max-height: 48vh; }
+
+    /* Four stats across is unreadable at this width; two rows of two. */
+    .progress-stats { flex-wrap: wrap; gap: 10px 0; }
+    .progress-stat { flex: 1 0 50%; }
+
+    .param-range-row { grid-template-columns: 1fr; }
+
+    /* Full-screen modals — a centred card wastes the little space there is.
+       Height is left alone on purpose: the Excel viewer sets height:90vh
+       inline for its own flex layout, and overriding that gains nothing. */
+    .modal-card {
+        width: 100% !important;
+        max-width: none !important;
+        max-height: 100vh;
+        border-radius: 0;
+        border: none;
+    }
+
+    .run-option {
+        grid-template-columns: auto 1fr auto;
+        font-size: 10px;
+    }
+
+    .wfo-progress-detail { grid-template-columns: 1fr 1fr; }
+
+    /* Tap targets: 32px was fiddly with a thumb. */
+    .cell-action-btn { min-width: 30px; min-height: 30px; }
+    .btn { min-height: 34px; }
+}
 .opt-card-status.aggregating { background: var(--accent-blue-glow); color: var(--accent-blue); border: 1px solid rgba(59,130,246,0.3); }
 
 .opt-card-meta {
