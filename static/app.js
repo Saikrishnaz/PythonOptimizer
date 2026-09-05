@@ -10,13 +10,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // =========================================================================
     let analysisResult = null;  // Current script analysis
     let currentOptId = null;    // Running optimization ID
-    let progressSSE = null;     // SSE connection for progress
+    const progressStreams = new Map();  // optId -> EventSource, one per running run
+    let runsPollTimer = null;   // picks up queue advances and runs started elsewhere
     let currentResults = null;  // Latest results data
     let lwChart = null;         // Lightweight Charts instance
     let candleSeries = null;    // Candlestick series
     let currentDataPath = null; // Data path for charting
     let sortCol = null;
     let sortAsc = false;
+    let resultsView = 'top';    // 'top' | 'failed' — which results table is shown
+    let selectedRunIds = [];    // runs currently shown in the Results tab
+    // Runs this page has actually touched — started, resumed, watched, or
+    // opened from History. Deliberately NOT every run on disk: the picker is
+    // for the work in front of you, and it starts empty after a reload.
+    // Everything older lives in the History tab.
+    const sessionRuns = new Map();  // optId -> {id, script_name, completed, total, status, started_at}
     let savedUserData = { groups: [], favorites: {} }; // New state for Saved Backtests
 
     // =========================================================================
@@ -53,11 +61,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // INITIALIZATION
     // =========================================================================
     loadScripts();
-    fetchUserData();
+    // A folder link needs the saved groups before it can open one.
+    fetchUserData().then(applyDeepLink);
+    window.addEventListener('hashchange', applyDeepLink);
     setupNavigation();
     setupTabs();
     setupSectionToggles();
-    reattachToActiveOptimization();
+    // refreshRuns starts the poll itself, but only if something is in flight.
+    refreshRuns().then(showLastInterruptedRun);
 
     async function fetchUserData() {
         try {
@@ -345,16 +356,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // SEARCH SPACE ESTIMATION
     // =========================================================================
     function calculateGridCombinations() {
-        if (!analysisResult) return 0;
+        if (!analysisResult || !analysisResult.parameters) return 0;
         let total = 1;
         const cards = document.querySelectorAll('.param-card');
-        
+
         cards.forEach(card => {
             const isOptimizing = card.querySelector('.param-optimize-toggle')?.checked;
             if (!isOptimizing) return;
-            
+
             const name = card.dataset.paramName;
-            const paramDef = analysisResult.params.find(p => p.name === name);
+            // The analysis payload exposes `parameters`; reading `params` here
+            // threw as soon as any toggle was switched on, which silently killed
+            // the estimate panel and the oversized-grid guard along with it.
+            const paramDef = analysisResult.parameters.find(p => p.name === name);
             if (!paramDef) return;
 
             if (paramDef.type === 'bool') {
@@ -599,33 +613,38 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await res.json();
 
-            if (data.status === 'started') {
+            if (data.status === 'started' || data.status === 'queued') {
                 currentOptId = data.optimization_id;
-                showToast(data.message, 'success');
-                startProgressStream(currentOptId);
-                stopOptBtn.classList.remove('hidden');
-                setGlobalStatus('running', 'Optimizing...');
+                rememberRun(data.optimization_id, {
+                    script_name: scriptSelect.value,
+                    status: data.status === 'queued' ? 'queued' : 'running',
+                    completed: 0,
+                    total: payload.num_iterations,
+                });
+                showToast(data.message, data.status === 'queued' ? 'info' : 'success');
+                if (data.status === 'started') {
+                    // Queued runs get their stream when the scheduler starts them.
+                    startProgressStream(currentOptId);
+                    stopOptBtn.classList.remove('hidden');
+                }
                 switchTab('progress');
             } else {
                 throw new Error(data.detail || 'Failed to start');
             }
+            refreshRuns();
         } catch (e) {
             showToast(`Start failed: ${e.message}`, 'error');
-            startOptBtn.disabled = false;
         }
+        // Never latched off: queueing another run while one is going is the
+        // point of the concurrency limit.
+        startOptBtn.disabled = false;
         startOptBtn.innerHTML = '<i class="fa-solid fa-rocket"></i> Start Optimization';
     }
 
+    /** Sidebar Stop — acts on the run the dashboard is currently focused on. */
     async function stopOptimization() {
         if (!currentOptId) return;
-        try {
-            const res = await fetch(`/api/optimize/stop/${currentOptId}`, { method: 'POST' });
-            const data = await res.json();
-            // The run now stops for real, and stays resumable afterwards.
-            showToast(data.message || 'Optimization stopped — resume it any time', 'warning');
-        } catch (e) {
-            showToast('Failed to stop', 'error');
-        }
+        await stopRun(currentOptId);
     }
 
     // =========================================================================
@@ -641,60 +660,99 @@ document.addEventListener('DOMContentLoaded', () => {
         return `${Math.floor(s / 3600)}h ${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`;
     }
 
-    function ensureProgressPanel() {
-        emptyProgress.classList.add('hidden');
-
-        let panel = document.getElementById('activeProgressPanel');
-        if (!panel) {
-            panel = document.createElement('div');
-            panel.id = 'activeProgressPanel';
-            panel.className = 'progress-panel';
-            progressContent.prepend(panel);
+    /**
+     * The Progress tab hosts one panel per run, keyed by optimization id, plus
+     * a toolbar and the queue. Panels are addressed by `data-opt-id` and their
+     * innards by class, so any number can coexist — the old markup used fixed
+     * element ids, which meant a second run overwrote the first one's panel.
+     */
+    function runsContainer() {
+        let host = document.getElementById('runsHost');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'runsHost';
+            host.innerHTML = `
+                <div id="runsToolbar"></div>
+                <div id="runsPanels"></div>
+                <div id="queuePanel"></div>`;
+            progressContent.prepend(host);
         }
+        return host;
+    }
 
+    function runPanelFor(optId) {
+        emptyProgress.classList.add('hidden');
+        runsContainer();
+
+        const panels = document.getElementById('runsPanels');
+        let panel = panels.querySelector(`[data-opt-id="${optId}"]`);
+        if (panel) return panel;
+
+        panel = document.createElement('div');
+        panel.className = 'progress-panel';
+        panel.dataset.optId = optId;
         panel.innerHTML = `
             <div class="progress-header">
-                <div class="progress-title"><i class="fa-solid fa-gauge-high" style="color:var(--accent-blue);margin-right:6px;"></i> Optimization Progress</div>
+                <div class="progress-title">
+                    <i class="fa-solid fa-gauge-high" style="color:var(--accent-blue);margin-right:6px;"></i>
+                    <span class="p-name">${escapeHtml(optId)}</span>
+                    <span class="p-status-pill"></span>
+                </div>
                 <div class="progress-stats">
                     <div class="progress-stat">
-                        <div class="progress-stat-value" id="pCompleted">0</div>
+                        <div class="progress-stat-value p-completed">0</div>
                         <div class="progress-stat-label">Completed</div>
                     </div>
                     <div class="progress-stat">
-                        <div class="progress-stat-value" id="pTotal">0</div>
+                        <div class="progress-stat-value p-total">0</div>
                         <div class="progress-stat-label">Total</div>
                     </div>
                     <div class="progress-stat">
-                        <div class="progress-stat-value" id="pFailed" style="color:var(--red);">0</div>
+                        <div class="progress-stat-value p-failed" style="color:var(--red);">0</div>
                         <div class="progress-stat-label">Failed</div>
                     </div>
                     <div class="progress-stat">
-                        <div class="progress-stat-value" id="pPending" style="color:var(--text-muted);">0</div>
+                        <div class="progress-stat-value p-pending" style="color:var(--text-muted);">0</div>
                         <div class="progress-stat-label">Remaining</div>
                     </div>
                 </div>
             </div>
-            <div id="pBanner"></div>
+            <div class="p-banner"></div>
             <div class="progress-bar-container">
-                <div class="progress-bar" id="pBar" style="width:0%"></div>
+                <div class="progress-bar p-bar" style="width:0%"></div>
             </div>
             <div class="progress-detail">
-                <span id="pPercent">0%</span>
-                <span id="pETA">ETA: calculating...</span>
+                <span class="p-percent">0%</span>
+                <span class="p-eta">ETA: calculating...</span>
             </div>
-        `;
+            <div class="progress-actions">
+                <button class="btn btn-secondary btn-sm p-results-btn">
+                    <i class="fa-solid fa-table"></i> View Results
+                </button>
+                <button class="btn btn-danger btn-sm p-stop-btn">
+                    <i class="fa-solid fa-stop"></i> Stop
+                </button>
+            </div>`;
+        panels.appendChild(panel);
+
+        panel.querySelector('.p-results-btn').addEventListener('click', async () => {
+            await loadResults(optId);
+            switchTab('results');
+        });
+        panel.querySelector('.p-stop-btn').addEventListener('click', () => stopRun(optId));
         return panel;
     }
 
     /**
-     * Paint one progress payload.
+     * Paint one progress payload into that run's panel.
      *
      * The bar follows the server's `percent`, which counts a batch as done only
      * once it has actually produced a result. Older runs (and any payload
      * without `percent`) fall back to completed/total.
      */
-    function applyProgress(p) {
-        if (!p || !document.getElementById('pBar')) return;
+    function applyProgress(optId, p) {
+        const panel = document.querySelector(`#runsPanels [data-opt-id="${optId}"]`);
+        if (!p || !panel) return;
 
         const total = Number(p.total) || 0;
         const completed = Number(p.completed) || 0;
@@ -707,24 +765,37 @@ document.addEventListener('DOMContentLoaded', () => {
             ? p.pending
             : Math.max(total - completed, 0);
 
-        const set = (id, val) => {
-            const el = document.getElementById(id);
+        const set = (cls, val) => {
+            const el = panel.querySelector(cls);
             if (el) el.textContent = val;
         };
 
-        set('pCompleted', completed);
-        set('pTotal', total);
-        set('pFailed', p.failed || 0);
-        set('pPending', remaining);
-        set('pPercent', `${pct.toFixed(1)}%`);
+        set('.p-completed', completed);
+        set('.p-total', total);
+        set('.p-failed', p.failed || 0);
+        set('.p-pending', remaining);
+        set('.p-percent', `${pct.toFixed(1)}%`);
 
-        const elBar = document.getElementById('pBar');
+        const pill = panel.querySelector('.p-status-pill');
+        if (pill && p.status) {
+            pill.textContent = p.status;
+            pill.className = `p-status-pill opt-card-status ${p.status}`;
+        }
+
+        const stopBtn = panel.querySelector('.p-stop-btn');
+        if (stopBtn) stopBtn.classList.toggle('hidden', FINISHED_STATUSES.includes(p.status));
+
+        const elBar = panel.querySelector('.p-bar');
         if (elBar) elBar.style.width = `${pct.toFixed(1)}%`;
 
-        const elETA = document.getElementById('pETA');
+        const elETA = panel.querySelector('.p-eta');
         if (elETA) {
             if (p.status === 'aggregating') {
                 elETA.textContent = 'Aggregating results...';
+            } else if (p.status === 'planning') {
+                // Bayesian surrogate fit between waves — no batch is running,
+                // and on a large sweep this legitimately takes minutes.
+                elETA.textContent = 'Planning next batches (fitting model)...';
             } else if (p.status === 'stopping') {
                 elETA.textContent = 'Stopping — finishing in-flight batches...';
             } else if (FINISHED_STATUSES.includes(p.status)) {
@@ -748,7 +819,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     /** Offer to finish a run that stopped part-way instead of starting over. */
     function showResumeBanner(optId, p) {
-        const banner = document.getElementById('pBanner');
+        const panel = document.querySelector(`#runsPanels [data-opt-id="${optId}"]`);
+        const banner = panel && panel.querySelector('.p-banner');
         if (!banner) return;
 
         const remaining = p.remaining || p.pending || 0;
@@ -762,29 +834,51 @@ document.addEventListener('DOMContentLoaded', () => {
                     ${p.completed || 0} of ${p.total || 0} batches done,
                     <strong>${remaining}</strong> left to run.</span>
                 </div>
-                <button class="btn btn-success btn-sm" id="pResumeBtn">
+                <button class="btn btn-success btn-sm p-resume-btn">
                     <i class="fa-solid fa-play"></i> Resume
                 </button>
             </div>
         `;
-        const btn = document.getElementById('pResumeBtn');
+        const btn = banner.querySelector('.p-resume-btn');
         if (btn) btn.addEventListener('click', () => resumeOptimization(optId));
     }
 
+    function closeProgressStream(optId) {
+        const stream = progressStreams.get(optId);
+        if (stream) stream.close();
+        progressStreams.delete(optId);
+    }
+
+    /** Reflect however many runs are live in the header status indicator. */
+    function updateGlobalStatus() {
+        const live = progressStreams.size;
+        if (live === 0) {
+            setGlobalStatus('idle', 'Idle');
+        } else if (live === 1) {
+            const [optId] = progressStreams.keys();
+            const panel = document.querySelector(`#runsPanels [data-opt-id="${optId}"]`);
+            const pct = panel ? panel.querySelector('.p-percent')?.textContent : '';
+            setGlobalStatus('running', pct ? `Optimizing ${pct}` : 'Optimizing...');
+        } else {
+            setGlobalStatus('running', `${live} optimizations running`);
+        }
+    }
+
     function startProgressStream(optId) {
-        if (progressSSE) progressSSE.close();
+        // One stream per run; re-attaching to a run already streamed is a no-op.
+        if (progressStreams.has(optId)) return;
 
-        ensureProgressPanel();
+        runPanelFor(optId);
 
-        progressSSE = new EventSource(`/api/optimize/progress/${optId}`);
+        const stream = new EventSource(`/api/optimize/progress/${optId}`);
+        progressStreams.set(optId, stream);
 
-        progressSSE.onmessage = (event) => {
+        stream.onmessage = (event) => {
             try {
                 const p = JSON.parse(event.data);
 
                 if (p.status === 'done') {
-                    progressSSE.close();
-                    progressSSE = null;
+                    closeProgressStream(optId);
                     if (p.final_status && p.final_status !== 'completed') {
                         onOptimizationHalted(optId, p.final_status);
                     } else {
@@ -793,14 +887,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     return;
                 }
 
-                const view = applyProgress(p);
-                if (view) {
-                    setGlobalStatus('running', `${view.pct.toFixed(1)}% — ${view.completed}/${view.total}`);
-                }
+                applyProgress(optId, p);
+                updateGlobalStatus();
             } catch (e) { /* ignore parse errors */ }
         };
 
-        progressSSE.onerror = async () => {
+        stream.onerror = async () => {
             // EventSource retries by itself. Only finish when the server agrees
             // the run is actually over — a dropped connection used to be
             // reported as "completed" while batches were still running.
@@ -811,7 +903,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (p.is_running) return;
                 if (!FINISHED_STATUSES.includes(p.status)) return;
 
-                if (progressSSE) { progressSSE.close(); progressSSE = null; }
+                closeProgressStream(optId);
                 if (p.status === 'completed' && !p.resumable) {
                     onOptimizationComplete(optId);
                 } else {
@@ -821,33 +913,256 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    async function onOptimizationComplete(optId) {
-        startOptBtn.disabled = false;
-        stopOptBtn.classList.add('hidden');
-        setGlobalStatus('idle', 'Completed');
-        showToast('Optimization completed!', 'success');
+    /** Stop one run, whether it is executing or still waiting in the queue. */
+    async function stopRun(optId) {
+        try {
+            const res = await fetch(`/api/optimize/stop/${optId}`, { method: 'POST' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Stop failed');
+            // The run stays resumable either way.
+            showToast(data.message || 'Optimization stopped', 'warning');
+        } catch (e) {
+            showToast(`Stop failed: ${e.message}`, 'error');
+        }
+        refreshRuns();
+    }
+    window.stopRun = stopRun;
 
-        // Load results
-        await loadResults(optId);
-        switchTab('results');
+    /** Drop a run out of the queue before it ever starts. */
+    async function cancelQueued(optId) {
+        try {
+            const res = await fetch(`/api/optimize/queue/${optId}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Cancel failed');
+            showToast(`Removed ${optId} from the queue`, 'warning');
+        } catch (e) {
+            showToast(`Cancel failed: ${e.message}`, 'error');
+        }
+        refreshRuns();
+    }
+    window.cancelQueued = cancelQueued;
+
+    async function setMaxConcurrent(value) {
+        try {
+            const res = await fetch('/api/optimize/max-concurrent', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ max_concurrent: Number(value) }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Could not change the limit');
+            showToast(`Running up to ${data.max_concurrent} optimization(s) at a time`, 'success');
+        } catch (e) {
+            showToast(e.message, 'error');
+        }
+        refreshRuns();
     }
 
-    /** A run ended without finishing — keep the user on Progress with a Resume option. */
+    function renderRunsToolbar(data) {
+        const bar = document.getElementById('runsToolbar');
+        if (!bar) return;
+
+        const running = data.running.length;
+        const queued = data.queued.length;
+        const workers = data.worker_total || 0;
+        const cpus = data.cpu_count || 0;
+        // Each worker is a separate process running your strategy, so the sum
+        // across concurrent runs is what actually competes for the machine.
+        const overloaded = cpus > 0 && workers > cpus;
+
+        bar.innerHTML = `
+            <div class="runs-toolbar">
+                <div class="runs-toolbar-info">
+                    <span><i class="fa-solid fa-bolt" style="color:var(--accent-blue);"></i>
+                        <strong>${running}</strong> running</span>
+                    <span><i class="fa-regular fa-clock"></i> <strong>${queued}</strong> queued</span>
+                    <span class="${overloaded ? 'runs-warn' : ''}"
+                          title="Total worker processes across all running optimizations">
+                        <i class="fa-solid fa-microchip"></i> ${workers} worker(s)${cpus ? ` / ${cpus} CPUs` : ''}
+                    </span>
+                </div>
+                <div class="runs-toolbar-limit">
+                    <label class="form-label" style="margin:0;">Run at once</label>
+                    <input type="number" class="form-input" id="maxConcurrentInput"
+                           value="${data.max_concurrent}" min="1" max="16" style="width:70px;">
+                </div>
+            </div>
+            ${overloaded ? `
+            <div class="runs-warn-banner">
+                <i class="fa-solid fa-triangle-exclamation"></i>
+                ${workers} worker processes across ${running} runs on ${cpus} CPUs — batches may be
+                starved or killed. Lower the limit or the per-run worker count.
+            </div>` : ''}`;
+
+        const input = document.getElementById('maxConcurrentInput');
+        if (input) {
+            input.addEventListener('change', () => {
+                const v = Math.max(1, Math.min(16, parseInt(input.value) || 1));
+                input.value = v;
+                setMaxConcurrent(v);
+            });
+        }
+    }
+
+    function renderQueue(data) {
+        const host = document.getElementById('queuePanel');
+        if (!host) return;
+
+        if (!data.queued.length) { host.innerHTML = ''; return; }
+
+        host.innerHTML = `
+            <div class="progress-panel">
+                <div class="progress-header">
+                    <div class="progress-title">
+                        <i class="fa-regular fa-clock" style="color:var(--yellow);margin-right:6px;"></i>
+                        Queued — starts automatically as slots free up
+                    </div>
+                </div>
+                <div class="queue-list">
+                    ${data.queued.map(q => `
+                        <div class="queue-item">
+                            <span class="queue-pos">${q.position}</span>
+                            <div class="queue-meta">
+                                <div class="queue-name">${escapeHtml(q.script_name || q.optimization_id)}</div>
+                                <div class="queue-sub">
+                                    ${escapeHtml(String(q.mode || ''))} ·
+                                    ${q.num_iterations ?? '—'} iters ·
+                                    ${q.num_workers ?? '—'} workers${q.resume ? ' · resume' : ''}
+                                </div>
+                            </div>
+                            <button class="btn btn-danger btn-sm"
+                                    onclick="cancelQueued('${q.optimization_id}')">
+                                <i class="fa-solid fa-xmark"></i> Cancel
+                            </button>
+                        </div>`).join('')}
+                </div>
+            </div>`;
+    }
+
+    /**
+     * Sync the Progress tab with the server: a panel and a live stream per
+     * running optimization, plus the queue.
+     *
+     * This also covers reattaching after a page reload or a server restart —
+     * without it the tab came back empty with no way into a run already in
+     * flight, and the only visible option was to start over from batch 1.
+     */
+    async function refreshRuns() {
+        let data;
+        try {
+            const res = await fetch('/api/optimize/runs');
+            if (!res.ok) return;
+            data = await res.json();
+        } catch (e) {
+            return;   // dashboard works fine without it
+        }
+
+        runsContainer();
+        renderRunsToolbar(data);
+        renderQueue(data);
+
+        const live = new Set(data.running.map(r => r.optimization_id));
+
+        for (const run of data.running) {
+            runPanelFor(run.optimization_id);
+            applyProgress(run.optimization_id, run.progress);
+            startProgressStream(run.optimization_id);
+            rememberRun(run.optimization_id, {
+                script_name: run.script_name,
+                status: (run.progress || {}).status || 'running',
+                completed: (run.progress || {}).completed,
+                total: (run.progress || {}).total,
+            });
+            if (!currentOptId) currentOptId = run.optimization_id;
+        }
+        for (const q of data.queued) {
+            rememberRun(q.optimization_id, {
+                script_name: q.script_name,
+                status: 'queued',
+                completed: 0,
+                total: q.num_iterations,
+            });
+        }
+
+        // Drop streams for runs the server no longer reports as running.
+        for (const optId of [...progressStreams.keys()]) {
+            if (!live.has(optId)) closeProgressStream(optId);
+        }
+
+        // A finished panel stays until the user starts something else, so the
+        // final numbers remain readable; only clear when nothing is left.
+        if (!data.running.length && !data.queued.length && !progressStreams.size) {
+            const panels = document.getElementById('runsPanels');
+            if (panels && !panels.children.length) emptyProgress.classList.remove('hidden');
+        }
+
+        // Nothing in flight means nothing to poll for.
+        if (data.running.length || data.queued.length) startRunsPolling();
+        else stopRunsPolling();
+
+        updateGlobalStatus();
+        return data;
+    }
+
+    /**
+     * Poll for things SSE cannot report: the queue advancing, and runs started
+     * from another tab.
+     *
+     * Deliberately slow, and only while something is actually in flight — live
+     * progress already arrives over SSE, so this is just a catch-up tick.
+     */
+    function startRunsPolling() {
+        if (runsPollTimer) return;
+        runsPollTimer = setInterval(refreshRuns, 15000);
+    }
+
+    function stopRunsPolling() {
+        if (!runsPollTimer) return;
+        clearInterval(runsPollTimer);
+        runsPollTimer = null;
+    }
+
+    async function onOptimizationComplete(optId) {
+        startOptBtn.disabled = false;
+
+        rememberRun(optId, { status: 'completed' });
+        const data = await refreshRuns();
+        const stillBusy = data && (data.running.length || data.queued.length);
+
+        // With several runs in flight, yanking the view to Results every time
+        // one finishes would fight the user. Only follow through when this was
+        // the last thing running.
+        if (!stillBusy) {
+            stopOptBtn.classList.add('hidden');
+            await loadResults(optId);
+            switchTab('results');
+            showToast(`${optId} completed`, 'success');
+        } else {
+            showToast(`${optId} completed — pick it in the Results tab to view`, 'success');
+            // Keep the already-open Results view in sync if it is showing runs.
+            if (selectedRunIds.length) renderResults(currentResults);
+        }
+    }
+
+    /** A run ended without finishing — keep its panel with a Resume option. */
     async function onOptimizationHalted(optId, status) {
         startOptBtn.disabled = false;
-        stopOptBtn.classList.add('hidden');
-        setGlobalStatus('idle', status || 'interrupted');
-        showToast(`Optimization ${status || 'interrupted'} — you can resume it`, 'warning');
+        showToast(`${optId} ${status || 'interrupted'} — you can resume it`, 'warning');
 
         try {
             const res = await fetch(`/api/optimize/status/${optId}`);
             if (res.ok) {
                 const p = (await res.json()).progress || {};
-                ensureProgressPanel();
-                applyProgress(p);
+                runPanelFor(optId);
+                applyProgress(optId, p);
                 showResumeBanner(optId, p);
             }
         } catch (e) { /* banner is best-effort */ }
+
+        const data = await refreshRuns();
+        if (!(data && (data.running.length || data.queued.length))) {
+            stopOptBtn.classList.add('hidden');
+        }
         switchTab('progress');
     }
 
@@ -861,18 +1176,25 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(`/api/optimize/resume/${optId}`, { method: 'POST' });
             const data = await res.json();
-            if (!res.ok || data.status !== 'resumed') {
+            if (!res.ok || !['resumed', 'queued'].includes(data.status)) {
                 throw new Error(data.detail || 'Resume failed');
             }
 
             currentOptId = optId;
-            showToast(data.message || 'Optimization resumed', 'success');
-            startProgressStream(optId);
-            startOptBtn.disabled = true;
-            stopOptBtn.classList.remove('hidden');
-            setGlobalStatus('running', 'Resuming...');
+            rememberRun(optId, {
+                status: data.status === 'queued' ? 'queued' : 'running',
+                completed: data.completed,
+                total: data.total,
+            });
+            showToast(data.message || 'Optimization resumed',
+                      data.status === 'queued' ? 'info' : 'success');
+            if (data.status === 'resumed') {
+                startProgressStream(optId);
+                stopOptBtn.classList.remove('hidden');
+            }
             historyModal.classList.remove('active');
             switchTab('progress');
+            refreshRuns();
         } catch (e) {
             showToast(`Resume failed: ${e.message}`, 'error');
         }
@@ -880,89 +1202,294 @@ document.addEventListener('DOMContentLoaded', () => {
     window.resumeOptimization = resumeOptimization;
 
     /**
-     * Reattach the dashboard to whatever the server is doing.
+     * Show any run that was left unfinished, so it can be resumed.
      *
-     * Without this, reloading the page (or restarting the server) left the
-     * Progress tab empty with no way back into a run that was already in
-     * flight — the only visible option was to start over from batch 1.
+     * refreshRuns() covers everything currently running or queued; this adds
+     * the most recent orphan from a previous process, which has no live stream
+     * to discover it by.
      */
-    async function reattachToActiveOptimization() {
+    async function showLastInterruptedRun() {
         try {
             const res = await fetch('/api/optimize/active');
             if (!res.ok) return;
             const data = await res.json();
-            if (!data.optimization_id) return;
+            if (!data.optimization_id || data.is_running || !data.resumable) return;
 
-            currentOptId = data.optimization_id;
-
-            if (data.is_running) {
-                startProgressStream(currentOptId);
-                applyProgress(data.progress);
-                startOptBtn.disabled = true;
-                stopOptBtn.classList.remove('hidden');
-                setGlobalStatus('running', 'Optimizing...');
-            } else if (data.resumable) {
-                ensureProgressPanel();
-                applyProgress(data.progress);
-                showResumeBanner(currentOptId, data.progress || {});
-                setGlobalStatus('idle', data.progress?.status || 'interrupted');
-            }
+            currentOptId = currentOptId || data.optimization_id;
+            runPanelFor(data.optimization_id);
+            applyProgress(data.optimization_id, data.progress);
+            showResumeBanner(data.optimization_id, data.progress || {});
         } catch (e) { /* dashboard works fine without it */ }
     }
 
     // =========================================================================
     // RESULTS
     // =========================================================================
+    /** Show one run's results. Kept for every existing call site. */
     async function loadResults(optId) {
+        return loadResultsFor([optId]);
+    }
+
+    /**
+     * Show one or more runs in the Results tab.
+     *
+     * Runs finish at different times while others are still going, so the tab
+     * has to be able to show any of them — and, when more than one is ticked,
+     * all of them together with a Run column so two sweeps can be compared.
+     */
+    async function loadResultsFor(ids) {
+        const wanted = [...new Set((ids || []).filter(Boolean))];
+        if (!wanted.length) return;
+
         try {
-            const res = await fetch(`/api/optimizations/${optId}/results?top=100`);
-            const data = await res.json();
+            const payloads = [];
+            for (const id of wanted) {
+                const res = await fetch(`/api/optimizations/${id}/results?top=100`);
+                if (!res.ok) continue;
+                const data = await res.json();
+                if (data.status === 'success') payloads.push([id, data]);
+            }
+            if (!payloads.length) throw new Error('no results for the selected run(s)');
 
-            if (data.status !== 'success') throw new Error('Failed to load results');
+            selectedRunIds = payloads.map(([id]) => id);
+            currentOptId = selectedRunIds[0];
 
-            currentResults = data;
-            currentOptId = optId;
-            resultsBadge.textContent = data.successful || 0;
-            renderResults(data);
+            // Opening a run's results — including from History — puts it in the
+            // picker, so two past runs can be pulled up and compared.
+            for (const [id, data] of payloads) {
+                rememberRun(id, {
+                    script_name: (data.config || {}).script_name,
+                    started_at: (data.config || {}).started_at,
+                    completed: data.successful,
+                    total: data.total_results,
+                    status: (data.config || {}).status || 'completed',
+                });
+            }
+            resultsView = 'top';   // don't carry a failed-view filter across runs
+
+            // A single run keeps its payload untouched, so nothing downstream
+            // sees a different shape than before.
+            currentResults = payloads.length === 1 ? payloads[0][1] : mergeResults(payloads);
+            resultsBadge.textContent = currentResults.successful || 0;
+            renderResults(currentResults);
         } catch (e) {
             showToast(`Failed to load results: ${e.message}`, 'error');
         }
     }
 
+    /** Combine several runs' payloads into one table, tagging each row's run. */
+    function mergeResults(payloads) {
+        const tag = (rows, id) => (rows || []).map(r => ({ ...r, __run: id }));
+        const merged = {
+            status: 'success',
+            __merged: true,
+            optimization_id: payloads.map(([id]) => id).join(', '),
+            config: payloads[0][1].config,
+            top_results: [], all_results: [], columns: [],
+            total_results: 0, successful: 0, failed: 0,
+        };
+
+        const cols = new Set();
+        for (const [id, data] of payloads) {
+            merged.top_results.push(...tag(data.top_results, id));
+            merged.all_results.push(...tag(data.all_results, id));
+            merged.total_results += data.total_results || 0;
+            merged.successful += data.successful || 0;
+            merged.failed += data.failed || 0;
+            (data.columns || []).forEach(c => cols.add(c));
+        }
+        merged.columns = [...cols];
+
+        // Best first across every run, so the comparison is immediately useful.
+        merged.top_results.sort((a, b) =>
+            (Number(b.composite_score) || -Infinity) - (Number(a.composite_score) || -Infinity));
+        return merged;
+    }
+
+    /** Note a run this session is working with, merging in whatever we know. */
+    function rememberRun(optId, meta) {
+        if (!optId) return;
+        const prev = sessionRuns.get(optId) || { id: optId };
+        sessionRuns.set(optId, { ...prev, ...meta, id: optId });
+    }
+
+    /** Session runs, newest first — what the picker offers. */
+    function sessionRunList() {
+        return [...sessionRuns.values()].sort((a, b) => String(b.id).localeCompare(String(a.id)));
+    }
+
+    /** "3 Sep 00:40" — every run of a script shares its name, so time is the label. */
+    function runWhen(run) {
+        let d = run.started_at ? new Date(run.started_at) : null;
+        if (!d || isNaN(d)) {
+            const m = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/.exec(run.id || '');
+            d = m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+        }
+        if (!d || isNaN(d)) return run.id;
+        return d.toLocaleString(undefined, {
+            day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+        });
+    }
+
+    /**
+     * A single compact control for choosing which run(s) the table shows.
+     *
+     * One row, whatever the run count. A chip per run wrapped onto several
+     * lines and ate half the panel — and since every run of a script carries
+     * the same name, the chips were indistinguishable anyway. The dropdown
+     * scrolls instead of growing, and leads with the start time.
+     */
+    function runSwitcherHtml() {
+        const runs = sessionRunList();
+        if (runs.length < 2) return '';
+
+        const selected = runs.filter(r => selectedRunIds.includes(r.id));
+        const first = selected[0] || runs[0];
+        const summary = selected.length > 1
+            ? `${selected.length} runs compared`
+            : `${runWhen(first)} · ${first.completed || 0}/${first.total || 0}`;
+
+        const options = runs.map(r => {
+            const on = selectedRunIds.includes(r.id);
+            return `
+                <label class="run-option ${on ? 'active' : ''}" title="${escapeAttr(r.id)}">
+                    <input type="checkbox" data-run-id="${escapeAttr(r.id)}" ${on ? 'checked' : ''}>
+                    <span class="run-option-when">${escapeHtml(runWhen(r))}</span>
+                    <span class="run-option-name">${escapeHtml(r.script_name || r.id)}</span>
+                    <span class="run-option-meta">${r.completed || 0}/${r.total || 0}</span>
+                    <span class="run-option-status opt-card-status ${escapeAttr(r.status || '')}">${escapeHtml(r.status || '')}</span>
+                </label>`;
+        }).join('');
+
+        return `
+            <div class="run-picker">
+                <button type="button" class="run-picker-btn" id="runPickerBtn">
+                    <i class="fa-solid fa-layer-group"></i>
+                    <span class="run-picker-current">${escapeHtml(summary)}</span>
+                    <span class="run-picker-count">${runs.length}</span>
+                    <i class="fa-solid fa-chevron-down"></i>
+                </button>
+                <div class="run-picker-menu hidden" id="runPickerMenu">
+                    <div class="run-picker-head">Tick one to view · several to compare</div>
+                    <div class="run-picker-list">${options}</div>
+                </div>
+            </div>`;
+    }
+
+    /** Render the results body with the run picker above it. */
+    function setResultsHtml(bodyHtml) {
+        resultsContainer.innerHTML = runSwitcherHtml() + bodyHtml;
+
+        const btn = document.getElementById('runPickerBtn');
+        const menu = document.getElementById('runPickerMenu');
+        if (btn && menu) {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                menu.classList.toggle('hidden');
+            });
+            menu.addEventListener('click', (e) => e.stopPropagation());
+        }
+
+        resultsContainer.querySelectorAll('.run-option input[data-run-id]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const picked = [...resultsContainer.querySelectorAll('.run-option input:checked')]
+                    .map(x => x.dataset.runId);
+                // Never leave the tab with nothing selected.
+                loadResultsFor(picked.length ? picked : [cb.dataset.runId]);
+            });
+        });
+    }
+
+    // Any click outside the dropdown closes it.
+    document.addEventListener('click', () => {
+        const menu = document.getElementById('runPickerMenu');
+        if (menu) menu.classList.add('hidden');
+    });
+
+    /** Every batch that ran but didn't succeed. */
+    function failedRowsOf(data) {
+        return (data.all_results || []).filter(r => r.status !== 'OK');
+    }
+
+    /**
+     * Table of failed batches, with the same per-row actions the successful
+     * table has. A failed batch is often the one you most want to reload —
+     * to reproduce the failure with its exact parameters.
+     */
+    function buildFailedTable(rows, heading, extraHeaderHtml = '') {
+        let html = `
+            <div style="padding:0 0 12px; display:flex; justify-content:space-between; align-items:center;">
+                <div style="font-size:14px; font-weight:600; color:#ef4444;">
+                    <i class="fa-solid fa-triangle-exclamation" style="margin-right:6px;"></i>
+                    ${heading}
+                </div>
+                <div class="btn-group">${extraHeaderHtml}</div>
+            </div>
+            <div class="results-table-wrapper" style="max-height:calc(100vh - 200px); overflow:auto;">
+                <table class="results-table">
+                    <thead><tr>
+                        <th>Batch</th>
+                        <th>Status</th>
+                        <th>Error</th>
+                        <th>Actions</th>
+                    </tr></thead><tbody>`;
+
+        rows.forEach(row => {
+            const batch = row.batch || '';
+            const err = row.error || 'Unknown Error';
+            // Merged rows carry their own run; single-run rows use the focused one.
+            const rowOptId = row.__run || currentOptId;
+            html += `<tr>
+                <td>${escapeHtml(batch)}</td>
+                <td style="color:#ef4444;font-weight:bold">${escapeHtml(String(row.status || ''))}</td>
+                <td style="color:#f87171;font-size:12px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeAttr(err)}">${escapeHtml(err)}</td>
+                <td style="display:flex; gap:4px;">
+                    <button class="cell-action-btn" onclick="viewBatch('${rowOptId}', '${batch}')" title="View Details">
+                        <i class="fa-solid fa-eye"></i>
+                    </button>
+                    <button class="cell-action-btn" onclick="loadOptimization('${rowOptId}', '${batch}')" title="Load into Optimizer">
+                        <i class="fa-solid fa-pen-to-square"></i>
+                    </button>
+                </td>
+            </tr>`;
+        });
+
+        return html + '</tbody></table></div>';
+    }
+
+    window.setResultsView = function(view) {
+        resultsView = view;
+        if (currentResults) renderResults(currentResults);
+    };
+
     function renderResults(data) {
+        const failed = failedRowsOf(data);
+
+        // Failed-batch view, when the user asked for it from the toggle.
+        if (resultsView === 'failed' && failed.length > 0) {
+            setResultsHtml(buildFailedTable(
+                failed,
+                `Failed Batches — ${failed.length} of ${data.total_results}`,
+                `<button class="btn btn-secondary btn-sm" onclick="setResultsView('top')">
+                    <i class="fa-solid fa-trophy"></i> Back to Top Results
+                 </button>`
+            ));
+            return;
+        }
+
         if (!data.top_results || data.top_results.length === 0) {
             if (data.all_results && data.all_results.length > 0) {
-                // Show failed results
-                let html = `
-                    <div style="padding:0 0 12px; display:flex; justify-content:space-between; align-items:center;">
-                        <div style="font-size:14px; font-weight:600; color:#ef4444;">
-                            <i class="fa-solid fa-triangle-exclamation" style="margin-right:6px;"></i>
-                            Optimization Failed — ${data.total_results} batches failed
-                        </div>
-                    </div>
-                    <div class="results-table-wrapper" style="max-height:calc(100vh - 200px); overflow:auto;">
-                        <table class="results-table">
-                            <thead><tr>
-                                <th>Batch</th>
-                                <th>Status</th>
-                                <th>Error</th>
-                            </tr></thead><tbody>`;
-                data.all_results.forEach(row => {
-                    html += `<tr>
-                        <td>${row.batch || ''}</td>
-                        <td style="color:#ef4444;font-weight:bold">${row.status}</td>
-                        <td style="color:#f87171;font-size:12px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${(row.error || '').replace(/"/g, '&quot;')}">${row.error || 'Unknown Error'}</td>
-                    </tr>`;
-                });
-                html += `</tbody></table></div>`;
-                resultsContainer.innerHTML = html;
+                setResultsHtml(buildFailedTable(
+                    data.all_results,
+                    `Optimization Failed — ${data.total_results} batches failed`
+                ));
             } else {
-                resultsContainer.innerHTML = `
+                setResultsHtml(`
                     <div class="empty-state">
                         <i class="fa-solid fa-exclamation-triangle"></i>
                         <h3>No Successful Results</h3>
                         <p>All batches failed or produced no trades. Check script parameters.</p>
-                    </div>`;
+                    </div>`);
             }
             return;
         }
@@ -995,8 +1522,19 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div style="font-size:14px; font-weight:600; color:var(--text-heading);">
                     <i class="fa-solid fa-trophy" style="color:#fbbf24;margin-right:6px;"></i>
                     Top Results — ${data.successful} successful / ${data.total_results} total
+                    ${data.__merged ? `<span style="color:var(--text-muted);font-weight:500;"> across ${selectedRunIds.length} runs</span>` : ''}
                 </div>
                 <div class="btn-group">
+                    ${failed.length > 0 ? `
+                    <button class="btn btn-secondary btn-sm" onclick="setResultsView('failed')"
+                            title="Failed batches can be loaded back into the optimizer too">
+                        <i class="fa-solid fa-triangle-exclamation" style="color:var(--red);"></i>
+                        ${failed.length} Failed
+                    </button>` : ''}
+                    <button class="btn btn-secondary btn-sm" onclick="shareCurrentResults()"
+                            title="Copy a link that reopens exactly this view">
+                        <i class="fa-solid fa-link"></i> Share
+                    </button>
                     <button class="btn btn-secondary btn-sm" onclick="exportResultsCSV()">
                         <i class="fa-solid fa-download"></i> Export CSV
                     </button>
@@ -1006,6 +1544,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <table class="results-table">
                     <thead><tr>
                         <th>#</th>
+                        ${data.__merged ? '<th>Run</th>' : ''}
                         <th>Batch</th>`;
 
         // Optimized param columns
@@ -1026,8 +1565,12 @@ document.addEventListener('DOMContentLoaded', () => {
         rows.forEach((row, i) => {
             const rank = i + 1;
             const rankClass = rank <= 3 ? `rank-${rank}` : '';
+            // In a merged view each row belongs to a different run, so every
+            // action below has to target that row's run, not the focused one.
+            const rowOptId = row.__run || currentOptId;
             html += `<tr class="${rankClass}">
                 <td>${rank}</td>
+                ${data.__merged ? `<td class="run-cell" title="${escapeAttr(rowOptId)}">${escapeHtml(runWhen(sessionRuns.get(rowOptId) || { id: rowOptId }))}</td>` : ''}
                 <td>${row.batch || ''}</td>`;
 
             optParamNames.forEach(name => {
@@ -1046,35 +1589,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 html += `<td class="${cls}">${formatValue(v)}</td>`;
             });
 
-            const key = `${currentOptId}/${row.batch}`;
+            const key = `${rowOptId}/${row.batch}`;
             const isSaved = savedUserData && savedUserData.favorites && savedUserData.favorites[key];
             const starColor = isSaved ? 'var(--accent-yellow, #f59e0b)' : 'inherit';
             const starClass = isSaved ? 'fa-solid fa-star' : 'fa-regular fa-star';
 
             html += `<td style="display:flex; gap:4px;">
-                <button class="cell-action-btn" onclick="openSaveModal('${currentOptId}', '${row.batch}')" title="Save / Review">
+                <button class="cell-action-btn" onclick="openSaveModal('${rowOptId}', '${row.batch}')" title="Save / Review">
                     <i class="${starClass}" style="color:${starColor};"></i>
                 </button>
-                <button class="cell-action-btn" onclick="viewBatch('${currentOptId}', '${row.batch}')" title="View Details">
+                <button class="cell-action-btn" onclick="viewBatch('${rowOptId}', '${row.batch}')" title="View Details">
                     <i class="fa-solid fa-eye"></i>
                 </button>
-                <button class="cell-action-btn" onclick="viewBatchChart('${currentOptId}', '${row.batch}')" title="View on Chart">
+                <button class="cell-action-btn" onclick="viewBatchChart('${rowOptId}', '${row.batch}')" title="View on Chart">
                     <i class="fa-solid fa-chart-line"></i>
                 </button>
-                <button class="cell-action-btn" onclick="viewExcel('${currentOptId}', '${row.batch}')" title="View Excel Report">
+                <button class="cell-action-btn" onclick="viewExcel('${rowOptId}', '${row.batch}')" title="View Excel Report">
                     <i class="fa-solid fa-table"></i>
                 </button>
-                <button class="cell-action-btn" onclick="loadOptimization('${currentOptId}', '${row.batch}')" title="Load & Edit Parameters">
+                <button class="cell-action-btn" onclick="loadOptimization('${rowOptId}', '${row.batch}')" title="Load & Edit Parameters">
                     <i class="fa-solid fa-pen-to-square"></i>
                 </button>
-                <a class="cell-action-btn" href="/api/download/${currentOptId}/${row.batch}/excel" title="Download Excel Report" download style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">
+                <button class="cell-action-btn" onclick="shareBatch('${rowOptId}', '${row.batch}')" title="Copy a link to this batch">
+                    <i class="fa-solid fa-link"></i>
+                </button>
+                <a class="cell-action-btn" href="/api/download/${rowOptId}/${row.batch}/excel" title="Download Excel Report" download style="display:inline-flex;align-items:center;justify-content:center;text-decoration:none;">
                     <i class="fa-solid fa-file-excel"></i>
                 </a>
             </td></tr>`;
         });
 
         html += '</tbody></table></div>';
-        resultsContainer.innerHTML = html;
+        setResultsHtml(html);
 
         // Setup sort headers
         resultsContainer.querySelectorAll('th[data-sort]').forEach(th => {
@@ -1186,6 +1732,15 @@ document.addEventListener('DOMContentLoaded', () => {
             batchModal.classList.remove('active');
             viewBatchChart(optId, batchId);
         };
+
+        // Reuse the already-fetched payload instead of re-requesting the batch.
+        const loadBtn = document.getElementById('batchLoadBtn');
+        if (loadBtn) {
+            loadBtn.onclick = () => {
+                batchModal.classList.remove('active');
+                showLoadBatchModal(optId, batchId, data);
+            };
+        }
     }
 
     document.getElementById('closeBatchModal').addEventListener('click', () => batchModal.classList.remove('active'));
@@ -1249,6 +1804,14 @@ document.addEventListener('DOMContentLoaded', () => {
                                 title="Continue this run — at least ${opt.remaining || 0} batches still have no result">
                             <i class="fa-solid fa-play"></i> Resume
                         </button>` : ''}
+                        <button class="btn btn-secondary btn-sm edit-opt-btn" data-id="${opt.id}"
+                                title="Load this run's settings and parameter ranges into the optimizer">
+                            <i class="fa-solid fa-pen-to-square"></i> Edit
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="shareRun('${opt.id}')"
+                                title="Copy a link that opens this run's results">
+                            <i class="fa-solid fa-link"></i> Share
+                        </button>
                         <button class="btn btn-secondary btn-sm view-opt-btn" data-id="${opt.id}">
                             <i class="fa-solid fa-eye"></i> View Results
                         </button>
@@ -1265,6 +1828,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     resumeOptimization(btn.dataset.id);
+                });
+            });
+
+            historyList.querySelectorAll('.edit-opt-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    editOptimization(btn.dataset.id);
                 });
             });
 
@@ -1414,6 +1984,122 @@ document.addEventListener('DOMContentLoaded', () => {
         return div.innerHTML;
     }
 
+    /**
+     * escapeHtml() leaves quotes alone, which is fine in text nodes but breaks
+     * out of a double-quoted attribute. Python tracebacks routinely contain
+     * quotes, so anything going into title="..." needs this instead.
+     */
+    function escapeAttr(str) {
+        return escapeHtml(str == null ? '' : String(str))
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // =========================================================================
+    // SHARING — clipboard + deep links
+    // =========================================================================
+
+    /** Copy text, with a fallback for contexts without the async clipboard. */
+    async function copyToClipboard(text, label = 'Copied') {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                // Plain http over a LAN address has no async clipboard API.
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.setAttribute('readonly', '');
+                ta.style.cssText = 'position:fixed;top:-1000px;opacity:0;';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                ta.remove();
+            }
+            showToast(`${label} to clipboard`, 'success');
+            return true;
+        } catch (e) {
+            showToast(`Could not copy: ${e.message}`, 'error');
+            return false;
+        }
+    }
+
+    /**
+     * A link that reopens this exact view.
+     *
+     * The target lives in the URL hash, so one link works from localhost, a LAN
+     * address or an ngrok tunnel without any server-side routing.
+     */
+    function buildShareLink(hash) {
+        return `${location.origin}${location.pathname}#${hash}`;
+    }
+
+    window.shareRun = (optId) =>
+        copyToClipboard(buildShareLink(`run=${encodeURIComponent(optId)}`), 'Run link copied');
+
+    window.shareRuns = (ids) =>
+        copyToClipboard(buildShareLink(`runs=${ids.map(encodeURIComponent).join(',')}`),
+                        `Link to ${ids.length} runs copied`);
+
+    window.shareBatch = (optId, batchId) =>
+        copyToClipboard(
+            buildShareLink(`batch=${encodeURIComponent(optId)}/${encodeURIComponent(batchId)}`),
+            'Batch link copied');
+
+    window.shareFolder = (name) =>
+        copyToClipboard(buildShareLink(`folder=${encodeURIComponent(name)}`), 'Folder link copied');
+
+    /** Share whatever the Results tab is currently showing. */
+    window.shareCurrentResults = () => {
+        if (!selectedRunIds.length) {
+            showToast('Nothing loaded to share yet', 'warning');
+            return;
+        }
+        return selectedRunIds.length === 1
+            ? window.shareRun(selectedRunIds[0])
+            : window.shareRuns(selectedRunIds);
+    };
+
+    /** Open whatever a shared link points at. */
+    async function applyDeepLink() {
+        const raw = (location.hash || '').replace(/^#/, '');
+        const eq = raw.indexOf('=');
+        if (eq < 1) return;
+
+        const key = raw.slice(0, eq);
+        const rawValue = raw.slice(eq + 1);
+        if (!rawValue) return;
+
+        const dec = (s) => { try { return decodeURIComponent(s); } catch (e) { return s; } };
+
+        try {
+            if (key === 'run') {
+                await loadResultsFor([dec(rawValue)]);
+                switchTab('results');
+            } else if (key === 'runs') {
+                const ids = rawValue.split(',').map(s => dec(s.trim())).filter(Boolean);
+                if (ids.length) {
+                    await loadResultsFor(ids);
+                    switchTab('results');
+                }
+            } else if (key === 'batch') {
+                // optimisation ids never contain a slash, so the first one splits.
+                const slash = rawValue.indexOf('/');
+                if (slash < 0) return;
+                const optId = dec(rawValue.slice(0, slash));
+                const batchId = dec(rawValue.slice(slash + 1));
+                if (!optId || !batchId) return;
+                await loadResultsFor([optId]);
+                switchTab('results');
+                viewBatch(optId, batchId);
+            } else if (key === 'folder') {
+                switchTab('saved');
+                renderSavedBacktests(dec(rawValue));
+            }
+        } catch (e) {
+            showToast(`Could not open that link: ${e.message}`, 'error');
+        }
+    }
+
     function setGlobalStatus(state, text) {
         globalStatusDot.className = 'status-dot ' + state;
         globalStatusText.textContent = text;
@@ -1499,72 +2185,279 @@ document.addEventListener('DOMContentLoaded', () => {
     // =========================================================================
     // LOAD & EDIT OPTIMIZATION
     // =========================================================================
+    /** Set one sidebar field and let its listeners react. */
+    function setFieldValue(id, value) {
+        if (value === undefined || value === null || value === '') return;
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.value = value;
+        el.dispatchEvent(new Event('change'));
+    }
+
+    /**
+     * Restore the Optimization Settings header: mode, iterations, parallel
+     * workers, seed, ranking metric, top N, and the drawdown options.
+     */
+    function applyRunSettings(config) {
+        setFieldValue('optModeSelect', config.mode);
+        setFieldValue('iterationsInput', config.num_iterations);
+        setFieldValue('workersInput', config.num_workers);
+        setFieldValue('seedInput', config.seed);
+        setFieldValue('rankingSelect', config.ranking_metric);
+        setFieldValue('topNInput', config.top_n);
+        // Dispatching change on the mode select toggles the auto/manual panels.
+        setFieldValue('ddOptMode', config.drawdown_optimization);
+        setFieldValue('ddMinTpd', config.dd_min_trades_per_day);
+        setFieldValue('ddTargetTpd', config.dd_target_trades_per_day);
+    }
+
+    /** Restore one parameter card: its value, and whether it is being swept. */
+    function applyParamToForm(p, paramValues, config, optimizeParams) {
+        const name = p.name;
+
+        // Prefer the value supplied by the caller (a batch's own parameters),
+        // then the run's fixed params, then the script's current default.
+        let value = paramValues[name];
+        if (value === undefined && config.fixed_params) value = config.fixed_params[name];
+
+        if (value !== undefined) {
+            const el = document.querySelector(`.param-fixed-value[data-name="${name}"]`);
+            if (el) {
+                if (el.tagName === 'SELECT') {
+                    el.value = String(value);            // bool cards use a select
+                } else if (value !== null && typeof value === 'object') {
+                    el.value = JSON.stringify(value);    // dict / list params
+                } else {
+                    el.value = value;
+                }
+            }
+        }
+
+        const toggle = document.querySelector(`.param-optimize-toggle[data-name="${name}"]`);
+        if (!toggle) return;   // fixed-only parameter, e.g. a path
+
+        const spec = optimizeParams[name];
+        toggle.checked = Boolean(spec);
+        // Let the existing handler show/hide the range row and restyle the card.
+        toggle.dispatchEvent(new Event('change'));
+        if (!spec) return;
+
+        const card = toggle.closest('.param-card');
+        if (!card) return;
+
+        if (Array.isArray(spec.choices)) {
+            // Bool sweeps carry choices too, but their range row has no input.
+            const choicesEl = card.querySelector('.param-choices');
+            if (choicesEl) choicesEl.value = spec.choices.join(', ');
+            return;
+        }
+
+        const set = (selector, v) => {
+            const el = card.querySelector(selector);
+            if (el && v !== undefined && v !== null) el.value = v;
+        };
+        set('.param-range-min', spec.min);
+        set('.param-range-max', spec.max);
+        set('.param-range-step', spec.step);
+    }
+
+    /**
+     * Rebuild the whole sidebar form from a saved run.
+     *
+     * `mode` decides what happens to the parameters the run was sweeping:
+     *   'sweep' — put their ranges back, so the same search can run again
+     *   'pin'   — freeze every parameter at `paramValues`, to reproduce one
+     *             exact backtest (handy for debugging a failed batch)
+     *
+     * The Optimization Settings header is restored either way.
+     */
+    async function applyConfigToForm(config, paramValues, mode) {
+        const scriptName = config.script_name
+            || (config.script_path || '').split(/[\\/]/).pop();
+        if (!scriptName) throw new Error('this run has no script recorded');
+
+        const known = Array.from(scriptSelect.options).some(o => o.value === scriptName);
+        if (!known) throw new Error(`${scriptName} is no longer in backtests/`);
+
+        // Analyse the script and await it, rather than clicking the button and
+        // polling the DOM for the params section to appear.
+        scriptSelect.value = scriptName;
+        scriptSelect.dispatchEvent(new Event('change'));
+        await analyzeScript();
+        if (!analysisResult || !analysisResult.parameters) {
+            throw new Error('script analysis failed');
+        }
+
+        applyRunSettings(config);
+
+        const optimizeParams = (mode === 'sweep' && config.optimize_params) || {};
+        analysisResult.parameters.forEach(p =>
+            applyParamToForm(p, paramValues || {}, config, optimizeParams)
+        );
+
+        updateEstimates();
+        updateWfoEstimates();
+
+        // The script may have changed since the run: warn about parameters that
+        // no longer exist rather than dropping them silently.
+        const current = new Set(analysisResult.parameters.map(p => p.name));
+        const missing = Object.keys(optimizeParams).filter(n => !current.has(n));
+
+        return { scriptName, sweptCount: Object.keys(optimizeParams).length, missing };
+    }
+
+    /** Report what a load restored, including anything that no longer exists. */
+    function reportLoad(info, summary) {
+        showToast(`Loaded ${info.scriptName} — ${summary}`, 'success');
+        if (info.missing.length) {
+            showToast(
+                `${info.scriptName} no longer has: ${info.missing.join(', ')} — skipped`,
+                'warning'
+            );
+        }
+    }
+
+    // ---- "Load into Optimizer" modal (batch level) --------------------------
+    let loadBatchModal = null;
+
+    function ensureLoadBatchModal() {
+        if (loadBatchModal) return loadBatchModal;
+
+        loadBatchModal = document.createElement('div');
+        loadBatchModal.className = 'modal-overlay';
+        loadBatchModal.id = 'loadBatchModal';
+        loadBatchModal.innerHTML = `
+            <div class="modal-card" style="max-width: 560px;">
+                <div class="modal-header">
+                    <span class="modal-title">Load into Optimizer</span>
+                    <button class="modal-close" id="closeLoadBatchModal"><i class="fa-solid fa-xmark"></i></button>
+                </div>
+                <div class="modal-body" id="loadBatchModalBody"></div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="loadBatchCancelBtn">Cancel</button>
+                    <button class="btn btn-secondary" id="loadBatchSweepBtn">
+                        <i class="fa-solid fa-arrows-left-right"></i> Re-run this sweep
+                    </button>
+                    <button class="btn btn-primary" id="loadBatchPinBtn">
+                        <i class="fa-solid fa-thumbtack"></i> Reproduce this batch
+                    </button>
+                </div>
+            </div>`;
+        document.body.appendChild(loadBatchModal);
+
+        const close = () => loadBatchModal.classList.remove('active');
+        loadBatchModal.querySelector('#closeLoadBatchModal').addEventListener('click', close);
+        loadBatchModal.querySelector('#loadBatchCancelBtn').addEventListener('click', close);
+        loadBatchModal.addEventListener('click', (e) => {
+            if (e.target === loadBatchModal) close();
+        });
+        return loadBatchModal;
+    }
+
+    /** The Optimization Settings a load will restore, as label/value rows. */
+    function configSummaryHtml(config, heading) {
+        const swept = Object.keys(config.optimize_params || {});
+        const row = (label, value) =>
+            `<div class="metric-row"><span class="label">${escapeHtml(label)}</span>` +
+            `<span class="value">${escapeHtml(String(value))}</span></div>`;
+
+        return `
+            <div class="batch-detail-section">
+                <h4><i class="fa-solid fa-gears" style="color:var(--accent-blue);margin-right:4px;"></i> ${escapeHtml(heading)}</h4>
+                ${row('Script', config.script_name || '—')}
+                ${row('Optimization Mode', config.mode || '—')}
+                ${row('Iterations', config.num_iterations ?? '—')}
+                ${row('Parallel Workers', config.num_workers ?? '—')}
+                ${row('Random Seed', config.seed ?? '—')}
+                ${row('Ranking Metric', config.ranking_metric || '—')}
+                ${row('Top N Results', config.top_n ?? '—')}
+                ${row('Drawdown Optimization', config.drawdown_optimization || 'disabled')}
+                ${row('Swept parameters', swept.length ? swept.join(', ') : 'none')}
+            </div>`;
+    }
+
+    function showLoadBatchModal(optId, batchId, data) {
+        const modal = ensureLoadBatchModal();
+        const config = data.config || {};
+        const swept = Object.keys(config.optimize_params || {});
+
+        let outcome = 'never ran';
+        if (data.metrics && data.metrics.status) {
+            outcome = data.metrics.status.ok ? 'succeeded' : 'failed';
+        }
+
+        modal.querySelector('#loadBatchModalBody').innerHTML = `
+            <div style="margin-bottom:12px; font-size:12px; color:var(--text-muted);">
+                Restoring <strong style="color:var(--text-heading);">${escapeHtml(batchId)}</strong>
+                from <strong style="color:var(--text-heading);">${escapeHtml(optId)}</strong>
+                — this batch <strong style="color:var(--text-heading);">${outcome}</strong>.
+            </div>
+            ${configSummaryHtml(config, 'Settings to restore')}
+            <div style="margin-top:12px; font-size:11px; color:var(--text-muted); line-height:1.7;">
+                <strong style="color:var(--text-body);">Re-run this sweep</strong> —
+                restores the ranges above so the same search runs again.<br>
+                <strong style="color:var(--text-body);">Reproduce this batch</strong> —
+                pins every parameter to this batch's exact values for a single run.
+            </div>`;
+
+        const sweepBtn = modal.querySelector('#loadBatchSweepBtn');
+        const pinBtn = modal.querySelector('#loadBatchPinBtn');
+        sweepBtn.disabled = swept.length === 0;
+        sweepBtn.title = swept.length ? '' : 'This run had no swept parameters';
+
+        // Assigned, not added, so reopening the modal never stacks handlers.
+        const run = async (mode) => {
+            modal.classList.remove('active');
+            try {
+                const info = await applyConfigToForm(config, data.params || {}, mode);
+                reportLoad(info, mode === 'sweep'
+                    ? `${info.sweptCount} parameter(s) ready to sweep`
+                    : `pinned to ${batchId}`);
+            } catch (e) {
+                showToast(`Load failed: ${e.message}`, 'error');
+            }
+        };
+        sweepBtn.onclick = () => run('sweep');
+        pinBtn.onclick = () => run('pin');
+
+        modal.classList.add('active');
+    }
+
+    /** Load one batch — successful, failed, or never run — back into the form. */
     window.loadOptimization = async function(optId, batchId) {
         try {
-            // Fetch batch params and opt config
-            const [resBatch, resOpt] = await Promise.all([
-                fetch(`/api/optimizations/${optId}/batch/${batchId}`),
-                fetch(`/api/optimizations/${optId}/results?top=1`)
-            ]);
-            
-            if (!resBatch.ok) throw new Error('Failed to fetch batch');
-            const batchData = await resBatch.json();
-            const batchParams = batchData.params;
-            
-            const optData = await resOpt.json();
-            const scriptPath = optData.config.script_path;
-            // Get just the filename to match the select dropdown
-            const scriptName = scriptPath.split(/[\\/]/).pop();
+            const res = await fetch(`/api/optimizations/${optId}/batch/${batchId}`);
+            if (!res.ok) throw new Error(`batch ${batchId} not found`);
+            const data = await res.json();
 
-            // Switch to New tab
-            switchTab('new');
-            
-            // Select the script
-            const scriptSelect = document.getElementById('scriptSelect');
-            scriptSelect.value = scriptName;
-            scriptSelect.dispatchEvent(new Event('change'));
-            
-            // Trigger analysis
-            document.getElementById('analyzeBtn').click();
-            
-            showToast('Loading script parameters...', 'info');
-
-            // Poll until params section is visible (analysis done)
-            const checkDone = setInterval(() => {
-                if (document.getElementById('paramsSection').style.display !== 'none') {
-                    clearInterval(checkDone);
-                    
-                    // Uncheck all opt checkboxes to make them fixed
-                    document.querySelectorAll('.opt-checkbox').forEach(cb => {
-                        cb.checked = false;
-                        cb.dispatchEvent(new Event('change'));
-                    });
-
-                    // Wait a tiny bit for the UI to toggle the range inputs off
-                    setTimeout(() => {
-                        for (const [key, val] of Object.entries(batchParams)) {
-                            // Only set if we have a single fixed input for it
-                            const input = document.querySelector(`.param-fixed-value[data-name="${key}"]`);
-                            if (input) {
-                                if (input.type === 'checkbox') {
-                                    input.checked = val;
-                                } else if (typeof val === 'object' && val !== null) {
-                                    input.value = JSON.stringify(val);
-                                } else {
-                                    input.value = val;
-                                }
-                            }
-                        }
-                        showToast('Parameters loaded! Ready for a single validation run or further tweaking.', 'success');
-                    }, 100);
-                }
-            }, 200);
-            
-            // Safety timeout
-            setTimeout(() => clearInterval(checkDone), 10000);
-
+            batchModal.classList.remove('active');
+            historyModal.classList.remove('active');
+            showLoadBatchModal(optId, batchId, data);
         } catch (e) {
-            showToast('Failed to load optimization: ' + e.message, 'error');
+            showToast(`Failed to load batch: ${e.message}`, 'error');
+        }
+    };
+
+    /**
+     * Load a whole run's setup from the History list — every Optimization
+     * Setting plus the swept parameter ranges, ready to edit and re-run.
+     */
+    window.editOptimization = async function(optId) {
+        try {
+            const res = await fetch(`/api/optimizations/${optId}/config`);
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `no saved configuration for ${optId}`);
+            }
+            const config = (await res.json()).config || {};
+
+            historyModal.classList.remove('active');
+            const info = await applyConfigToForm(config, config.fixed_params || {}, 'sweep');
+            reportLoad(info, info.sweptCount
+                ? `${info.sweptCount} parameter(s) ready to sweep`
+                : 'settings restored');
+        } catch (e) {
+            showToast(`Edit failed: ${e.message}`, 'error');
         }
     };
 
@@ -1605,8 +2498,56 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('saveReview').value = '';
         }
         
+        loadReviewParams(optId, batchId);
         document.getElementById('saveModal').classList.add('active');
     };
+
+    // The batch's parameters, held so Save can store them with the review.
+    let reviewParams = {};
+
+    /**
+     * Show the batch's complete parameter set in the review modal, ready to copy.
+     *
+     * params.json is the merged set the batch actually ran with — the fixed
+     * parameters and its point in the sweep together — so nothing is missing.
+     */
+    async function loadReviewParams(optId, batchId) {
+        const block = document.getElementById('saveParamsBlock');
+        const preview = document.getElementById('saveParamsPreview');
+        const count = document.getElementById('saveParamsCount');
+        const btn = document.getElementById('copyParamsBtn');
+        if (!block || !preview || !btn) return;
+
+        reviewParams = {};
+        if (!batchId) {
+            // A whole run has no single parameter set.
+            block.classList.add('hidden');
+            return;
+        }
+
+        block.classList.remove('hidden');
+        preview.textContent = 'Loading parameters…';
+        if (count) count.textContent = '';
+        btn.disabled = true;
+
+        try {
+            const res = await fetch(`/api/optimizations/${optId}/batch/${batchId}`);
+            if (!res.ok) throw new Error(`batch ${batchId} not found`);
+            const data = await res.json();
+
+            reviewParams = data.params || {};
+            const text = JSON.stringify(reviewParams, null, 2);
+            const n = Object.keys(reviewParams).length;
+
+            preview.textContent = text;
+            if (count) count.textContent = `(${n})`;
+            btn.disabled = n === 0;
+            btn.onclick = () => copyToClipboard(text, `${n} parameters copied`);
+        } catch (e) {
+            preview.textContent = `Could not load parameters: ${e.message}`;
+            if (count) count.textContent = '';
+        }
+    }
 
     window.closeSaveModal = function() {
         document.getElementById('saveModal').classList.remove('active');
@@ -1642,6 +2583,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     group: group,
                     review: review,
                     metrics: metrics,
+                    // Kept with the review so the entry still describes what it
+                    // ran even if the run folder is later deleted.
+                    params: reviewParams,
                     timestamp: new Date().toISOString()
                 })
             });
@@ -1700,16 +2644,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    window.renderSavedBacktests = function() {
+    /**
+     * @param {string} [selectGroup] open this folder instead of the first one —
+     *                 used when a shared folder link is followed.
+     */
+    window.renderSavedBacktests = function(selectGroup) {
         const groupsList = document.getElementById('groupsList');
         groupsList.innerHTML = '';
-        
+
         if (!savedUserData.groups || savedUserData.groups.length === 0) {
             groupsList.innerHTML = '<div style="color:var(--text-secondary); font-size:12px;">No groups yet.</div>';
             renderSavedGroup(null);
             return;
         }
-        
+
+        const wanted = savedUserData.groups.includes(selectGroup) ? selectGroup : null;
+
         savedUserData.groups.forEach((g, i) => {
             const btn = document.createElement('div');
             btn.className = 'group-btn';
@@ -1737,9 +2687,37 @@ document.addEventListener('DOMContentLoaded', () => {
             };
             
             groupsList.appendChild(btn);
-            
-            if (i === 0) btn.click(); // Auto-select first group
+
+            // Auto-select: the requested folder, else the first one as before.
+            if (wanted ? g === wanted : i === 0) btn.click();
         });
+    };
+
+    /**
+     * Open every optimization saved in a folder together in the Results tab.
+     *
+     * A folder can hold whole runs and individual batches; both carry their
+     * run id, so the distinct set of those is what gets compared.
+     */
+    window.compareGroupInResults = async function(groupName) {
+        const ids = [...new Set(Object.values(savedUserData.favorites || {})
+            .filter(f => f.group === groupName)
+            .map(f => f.opt_id)
+            .filter(Boolean))];
+
+        if (!ids.length) {
+            showToast(`"${groupName}" has nothing saved in it yet`, 'warning');
+            return;
+        }
+
+        ids.forEach(id => rememberRun(id, {}));
+        await loadResultsFor(ids);
+        switchTab('results');
+        showToast(
+            ids.length === 1
+                ? `Opened the one optimization saved in "${groupName}"`
+                : `Comparing ${ids.length} optimizations from "${groupName}"`,
+            'success');
     };
 
     window.createNewGroup = async function() {
@@ -1774,9 +2752,21 @@ document.addEventListener('DOMContentLoaded', () => {
         const title = document.getElementById('currentGroupTitle');
         container.innerHTML = '';
         title.textContent = groupName ? groupName : 'All Saved';
-        
+
+        // Folder-level actions follow whichever folder is open.
+        const compareBtn = document.getElementById('compareGroupBtn');
+        const shareBtn = document.getElementById('shareGroupBtn');
+        if (compareBtn) {
+            compareBtn.disabled = !groupName;
+            compareBtn.onclick = groupName ? () => compareGroupInResults(groupName) : null;
+        }
+        if (shareBtn) {
+            shareBtn.disabled = !groupName;
+            shareBtn.onclick = groupName ? () => window.shareFolder(groupName) : null;
+        }
+
         if (!groupName) return;
-        
+
         const favorites = Object.values(savedUserData.favorites || {}).filter(f => f.group === groupName);
         if (favorites.length === 0) {
             container.innerHTML = '<div style="color:var(--text-secondary);">No backtests saved in this group.</div>';
