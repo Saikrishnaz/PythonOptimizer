@@ -450,6 +450,25 @@ class SteppedOptimizer:
     def tell(self, point, objective):
         return self._opt.tell(self._encode_point(point), objective)
 
+    def tell_many(self, points, objectives):
+        """
+        Report many observations in ONE call, so the surrogate is refitted once.
+
+        skopt refits the model on every tell(), and that fit is superlinear in
+        the number of observations: measured on a 9-parameter space it costs
+        ~4s at 50 points, ~61s at 300 and ~105s at 495. Reporting 495 results
+        one at a time therefore takes about seven hours, while handing skopt
+        the whole list takes eighty seconds — the same model, one fit.
+
+        That is not a hypothetical: a resumed run rebuilds the optimizer from
+        scratch and has to replay every batch that already finished, so a
+        near-complete Bayesian sweep would spend hours planning before it
+        could run its last few batches.
+        """
+        if not points:
+            return None
+        return self._opt.tell([self._encode_point(p) for p in points], list(objectives))
+
 
 def _nearest_index(values: list, value) -> int:
     """Position of `value` in an axis, snapping to the closest entry."""
@@ -1098,6 +1117,8 @@ def run_optimization(
         else:
             progress["failed"] += 1
 
+        progress["running"] = max(progress.get("running", 0) - 1, 0)
+
         if duration and duration > slowest_batch_seconds:
             slowest_batch_seconds = duration
 
@@ -1127,6 +1148,10 @@ def run_optimization(
                             config_class_name, python_exe): bd
             for bd in batch_dirs
         }
+        # In-flight count, so the dashboard shows work actually happening
+        # rather than a permanent running=0. record_outcome() decrements it.
+        progress["running"] = len(futures)
+        update_progress()
         interrupted = False
         for fut in as_completed(futures):
             batch_dir = futures[fut]
@@ -1143,6 +1168,7 @@ def run_optimization(
                 for pending_fut in futures:
                     pending_fut.cancel()
                 break
+        progress["running"] = 0
         return interrupted
 
     def execute_bayesian() -> bool:
@@ -1180,19 +1206,39 @@ def run_optimization(
             return base + abs(base) * 0.1 + 1.0
 
         def tell_completed():
-            """Report every finished batch the optimizer hasn't seen yet."""
+            """Report every finished batch the optimizer hasn't seen yet.
+
+            Collected and handed over in a single tell_many() so the surrogate
+            is refitted once per wave instead of once per batch. On a resume,
+            where every finished batch has to be replayed at once, that is the
+            difference between eighty seconds and seven hours.
+            """
+            points, objectives, indices = [], [], []
             for index in range(len(sweep_combos)):
                 if index in told:
                     continue
                 objective = objective_for(index)
                 if objective is None:
                     continue
-                told.add(index)
-                try:
-                    point = [sweep_combos[index][name] for name in param_names]
-                    bayes_opt.tell(point, objective)
-                except Exception as e:
-                    print(f"[optimizer] skopt.tell failed for batch {index + 1}: {e}")
+                points.append([sweep_combos[index][name] for name in param_names])
+                objectives.append(objective)
+                indices.append(index)
+
+            if not points:
+                return
+            try:
+                bayes_opt.tell_many(points, objectives)
+                told.update(indices)
+            except Exception as e:
+                # One unrepresentable point must not cost the model every other
+                # result in the wave, so fall back to reporting them singly.
+                print(f"[optimizer] skopt bulk tell failed ({e}); telling individually")
+                for index, point, objective in zip(indices, points, objectives):
+                    try:
+                        bayes_opt.tell(point, objective)
+                        told.add(index)
+                    except Exception as inner:
+                        print(f"[optimizer] skopt.tell failed for batch {index + 1}: {inner}")
 
         wave_size = max(num_workers, 1)
         queue = [i for i in range(len(sweep_combos))
@@ -1204,11 +1250,21 @@ def run_optimization(
                     return True
 
                 if not queue:
+                    # Fitting the surrogate and optimising the acquisition
+                    # function take minutes once there are a few hundred
+                    # observations, and no batch is running meanwhile. Say so:
+                    # a silent progress.json with running=0 is indistinguishable
+                    # from a dead run, which is exactly how an earlier sweep was
+                    # mistaken for hung and restarted.
+                    progress["status"] = "planning"
+                    update_progress()
                     tell_completed()
                     new_points = ask_bayesian_points(
                         bayes_opt, param_names,
                         min(wave_size, total_batches - len(sweep_combos)),
                     )
+                    progress["status"] = "running"
+                    update_progress()
                     if not new_points:
                         break
                     for sweep in new_points:
