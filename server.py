@@ -12,7 +12,11 @@ Endpoints:
   POST /api/optimize/resume/{id}       — Resume an interrupted/stopped run
   GET  /api/optimize/status/{id}       — Progress snapshot for one run
   GET  /api/optimize/active            — Run the dashboard should attach to
+  GET  /api/optimize/runs              — All running + queued runs, and the limit
+  POST /api/optimize/max-concurrent    — Change how many may run at once
+  DELETE /api/optimize/queue/{id}      — Drop a run out of the queue
   GET  /api/optimizations              — List all optimization runs
+  GET  /api/optimizations/{id}/config  — Saved settings for one run
   GET  /api/optimizations/{id}/results — Get results for an optimization
   DELETE /api/optimizations/{id}       — Delete an optimization run
   POST /api/data/convert               — Convert CSV → Parquet
@@ -67,6 +71,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Track running optimizations
 running_optimizations = {}  # id -> {"thread": Thread, "stop_flag": Event}
+
+# How long an SSE stream may stay silent before it sends a keepalive comment.
+SSE_KEEPALIVE_SECONDS = 15
 
 
 # =============================================================================
@@ -158,7 +165,10 @@ async def analyze_script_endpoint(req: AnalyzeRequest):
 # =============================================================================
 # Statuses that mean "this run was mid-flight". Anything left in one of these
 # after the process died is an orphan, and is what Resume picks up.
-LIVE_STATUSES = ("running", "aggregating", "resuming", "stopping")
+# "planning" is a Bayesian sweep fitting its surrogate between waves: no batch
+# is running, but the run is very much alive, so it belongs here or the orphan
+# sweeper would leave a dead planning run unmarked.
+LIVE_STATUSES = ("running", "aggregating", "resuming", "stopping", "planning")
 
 
 def _opt_dir(optimization_id: str) -> str:
@@ -178,16 +188,13 @@ def _is_live(optimization_id: str) -> bool:
     return bool(handle and handle["thread"].is_alive())
 
 
-def _launch_optimization(optimization_id: str, cfg: dict, resume: bool = False):
+def _start_thread(optimization_id: str, cfg: dict, resume: bool = False):
     """
-    Start (or restart) a run in a background thread.
+    Put a run on a background thread immediately, no capacity check.
 
-    Shared by /start and /resume so both paths get the same stop-flag wiring
-    and the same failure handling.
+    Only the scheduler calls this; everything else goes through
+    _launch_optimization(), which decides between starting and queueing.
     """
-    if optimization_id in running_optimizations:
-        raise HTTPException(409, "Optimization with this ID already running")
-
     stop_event = threading.Event()
 
     def run_in_thread():
@@ -227,10 +234,152 @@ def _launch_optimization(optimization_id: str, cfg: dict, resume: bool = False):
                 pass
         finally:
             running_optimizations.pop(optimization_id, None)
+            # A slot just freed up — let the next queued run take it.
+            _schedule_queued()
 
     thread = threading.Thread(target=run_in_thread, daemon=True)
     running_optimizations[optimization_id] = {"thread": thread, "stop_flag": stop_event}
     thread.start()
+
+
+# =============================================================================
+# OPTIMIZATION — SCHEDULER (concurrency limit + queue)
+# =============================================================================
+# Runs execute concurrently up to MAX_CONCURRENT; anything beyond that waits in
+# OPTIMIZATION_QUEUE and starts automatically as slots free up. The default of 1
+# keeps a single heavy sweep to itself, which is what a backtest that already
+# uses num_workers processes usually wants — raise it from the dashboard.
+OPTIMIZATION_QUEUE = []          # [{"optimization_id", "cfg", "resume", "queued_at"}]
+_scheduler_lock = threading.RLock()
+MAX_CONCURRENT = 1
+
+# Statuses an orphaned run can be left in when the process dies. "queued" is
+# included because a queued run's scheduler entry lives only in memory.
+ORPHANABLE_STATUSES = LIVE_STATUSES + ("queued",)
+
+
+def _running_ids() -> list:
+    return [oid for oid in list(running_optimizations) if _is_live(oid)]
+
+
+def _new_optimization_id(script_path: str) -> str:
+    """
+    A run id that is unique even when two runs start in the same second.
+
+    The id is also the run's folder name, so a collision meant the second run
+    would adopt the first one's directory — and, because the engine skips
+    batches that already have results, silently resume into it instead of
+    running its own sweep.
+    """
+    stem = os.path.splitext(os.path.basename(script_path))[0]
+    base = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + stem
+
+    candidate = base
+    suffix = 2
+    while (os.path.exists(_opt_dir(candidate))
+           or _is_live(candidate)
+           or _queued_index(candidate) >= 0):
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _queued_index(optimization_id: str) -> int:
+    for i, item in enumerate(OPTIMIZATION_QUEUE):
+        if item["optimization_id"] == optimization_id:
+            return i
+    return -1
+
+
+def _write_queued_progress(optimization_id: str, cfg: dict, position: int):
+    """
+    Give a queued run a progress.json right away.
+
+    Without it the run is invisible until it starts — no history card, nothing
+    in the progress list, and no way to tell it apart from a run that vanished.
+    """
+    opt_dir = _opt_dir(optimization_id)
+    os.makedirs(opt_dir, exist_ok=True)
+
+    total = int(cfg.get("num_iterations") or 0)
+    snapshot = build_progress_snapshot(opt_dir) if os.path.isdir(opt_dir) else {}
+    snapshot.update({
+        "optimization_id": optimization_id,
+        "status": "queued",
+        "queued_at": datetime.now().isoformat(),
+        "queue_position": position,
+        "mode": cfg.get("mode"),
+        "workers": cfg.get("num_workers"),
+    })
+    snapshot.setdefault("total", total)
+    for key, value in (("completed", 0), ("ok", 0), ("failed", 0),
+                       ("percent", 0.0), ("pending", snapshot.get("total", total))):
+        snapshot.setdefault(key, value)
+
+    try:
+        atomic_write_json(os.path.join(opt_dir, "progress.json"), snapshot)
+    except Exception:
+        pass
+
+    # Record the config too, so a queued run can be edited or resumed like any
+    # other. A resume already has one; never overwrite it.
+    config_path = os.path.join(opt_dir, "optimization_config.json")
+    if not os.path.exists(config_path):
+        try:
+            atomic_write_json(config_path, {
+                **cfg,
+                "script_name": os.path.basename(cfg.get("script_path") or ""),
+                "started_at": datetime.now().isoformat(),
+                "status": "queued",
+            })
+        except Exception:
+            pass
+
+
+def _schedule_queued():
+    """Start queued runs while there is spare capacity."""
+    with _scheduler_lock:
+        while OPTIMIZATION_QUEUE and len(_running_ids()) < MAX_CONCURRENT:
+            item = OPTIMIZATION_QUEUE.pop(0)
+            try:
+                _start_thread(item["optimization_id"], item["cfg"], item["resume"])
+                print(f"[scheduler] Started queued run {item['optimization_id']}")
+            except Exception as e:
+                print(f"[scheduler] Could not start {item['optimization_id']}: {e}")
+        # Positions shift as runs leave the queue.
+        for i, item in enumerate(OPTIMIZATION_QUEUE):
+            _write_queued_progress(item["optimization_id"], item["cfg"], i + 1)
+
+
+def _launch_optimization(optimization_id: str, cfg: dict, resume: bool = False):
+    """
+    Run now if a slot is free, otherwise queue.
+
+    Shared by /start and /resume so both paths get the same stop-flag wiring,
+    the same failure handling, and the same concurrency limit.
+
+    Returns "started" or "queued".
+    """
+    with _scheduler_lock:
+        if _is_live(optimization_id):
+            raise HTTPException(409, "Optimization with this ID already running")
+        if _queued_index(optimization_id) >= 0:
+            raise HTTPException(409, "Optimization with this ID is already queued")
+        running_optimizations.pop(optimization_id, None)  # clear a dead handle
+
+        if len(_running_ids()) < MAX_CONCURRENT:
+            _start_thread(optimization_id, cfg, resume)
+            return "started"
+
+        position = len(OPTIMIZATION_QUEUE) + 1
+        OPTIMIZATION_QUEUE.append({
+            "optimization_id": optimization_id,
+            "cfg": cfg,
+            "resume": resume,
+            "queued_at": datetime.now().isoformat(),
+        })
+        _write_queued_progress(optimization_id, cfg, position)
+        return "queued"
 
 
 def reconcile_interrupted_runs():
@@ -252,7 +401,7 @@ def reconcile_interrupted_runs():
             continue
 
         progress = _read_json(progress_path)
-        if not isinstance(progress, dict) or progress.get("status") not in LIVE_STATUSES:
+        if not isinstance(progress, dict) or progress.get("status") not in ORPHANABLE_STATUSES:
             continue
 
         try:
@@ -292,15 +441,25 @@ async def start_optimization(req: OptimizeRequest, background_tasks: BackgroundT
     if not os.path.exists(req.script_path):
         raise HTTPException(404, f"Script not found: {req.script_path}")
 
-    optimization_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + os.path.splitext(os.path.basename(req.script_path))[0]
+    optimization_id = _new_optimization_id(req.script_path)
 
     cfg = req.model_dump() if hasattr(req, "model_dump") else req.dict()
-    _launch_optimization(optimization_id, cfg, resume=False)
+    outcome = _launch_optimization(optimization_id, cfg, resume=False)
+
+    if outcome == "queued":
+        position = _queued_index(optimization_id) + 1
+        message = (f"Queued at position {position} — starts automatically when a "
+                   f"slot frees up ({MAX_CONCURRENT} run"
+                   f"{'' if MAX_CONCURRENT == 1 else 's'} at a time)")
+    else:
+        message = (f"Optimization started with {req.num_iterations} iterations "
+                   f"using {req.num_workers} workers")
 
     return {
-        "status": "started",
+        "status": outcome,
         "optimization_id": optimization_id,
-        "message": f"Optimization started with {req.num_iterations} iterations using {req.num_workers} workers"
+        "queue_position": _queued_index(optimization_id) + 1 if outcome == "queued" else 0,
+        "message": message,
     }
 
 
@@ -320,6 +479,8 @@ async def resume_optimization(optimization_id: str):
 
     if _is_live(optimization_id):
         raise HTTPException(409, "Optimization is already running")
+    if _queued_index(optimization_id) >= 0:
+        raise HTTPException(409, "Optimization is already queued")
     running_optimizations.pop(optimization_id, None)  # clear a dead handle
 
     config = _read_json(os.path.join(opt_dir, "optimization_config.json"))
@@ -343,7 +504,19 @@ async def resume_optimization(optimization_id: str):
     snapshot["resumed_at"] = datetime.now().isoformat()
     atomic_write_json(os.path.join(opt_dir, "progress.json"), snapshot)
 
-    _launch_optimization(optimization_id, config, resume=True)
+    outcome = _launch_optimization(optimization_id, config, resume=True)
+    if outcome == "queued":
+        position = _queued_index(optimization_id) + 1
+        return {
+            "status": "queued",
+            "optimization_id": optimization_id,
+            "queue_position": position,
+            "total": snapshot.get("total", 0),
+            "completed": snapshot.get("completed", 0),
+            "remaining": remaining,
+            "message": f"Queued at position {position} — {remaining} batches will "
+                       f"run when a slot frees up",
+        }
 
     return {
         "status": "resumed",
@@ -377,6 +550,115 @@ async def get_optimization_status(optimization_id: str):
     progress["is_running"] = live
 
     return {"status": "success", "optimization_id": optimization_id, "progress": progress}
+
+
+@app.get("/api/optimize/runs")
+async def list_active_runs():
+    """
+    Everything the Progress tab needs: the runs executing now, the ones waiting
+    for a slot, and the current concurrency limit.
+    """
+    running = []
+    for opt_id in sorted(_running_ids()):
+        progress = _read_json(os.path.join(_opt_dir(opt_id), "progress.json")) or {}
+        config = _read_json(os.path.join(_opt_dir(opt_id), "optimization_config.json")) or {}
+        running.append({
+            "optimization_id": opt_id,
+            "script_name": config.get("script_name", ""),
+            "mode": config.get("mode", ""),
+            "num_workers": config.get("num_workers"),
+            "progress": progress,
+        })
+
+    queued = []
+    with _scheduler_lock:
+        for i, item in enumerate(OPTIMIZATION_QUEUE):
+            cfg = item["cfg"]
+            queued.append({
+                "optimization_id": item["optimization_id"],
+                "script_name": os.path.basename(cfg.get("script_path") or ""),
+                "mode": cfg.get("mode"),
+                "num_iterations": cfg.get("num_iterations"),
+                "num_workers": cfg.get("num_workers"),
+                "resume": item["resume"],
+                "queued_at": item["queued_at"],
+                "position": i + 1,
+            })
+
+    worker_total = sum(int(r.get("num_workers") or 0) for r in running)
+    return {
+        "status": "success",
+        "max_concurrent": MAX_CONCURRENT,
+        "cpu_count": os.cpu_count() or 0,
+        "worker_total": worker_total,
+        "running": running,
+        "queued": queued,
+    }
+
+
+class ConcurrencyRequest(BaseModel):
+    max_concurrent: int
+
+
+@app.post("/api/optimize/max-concurrent")
+async def set_max_concurrent(req: ConcurrencyRequest):
+    """
+    Change how many optimizations may run at once.
+
+    Raising it immediately starts whatever the queue can now afford; lowering it
+    never interrupts a run that is already going — the surplus simply drains as
+    those runs finish.
+    """
+    global MAX_CONCURRENT
+    value = int(req.max_concurrent)
+    if value < 1 or value > 16:
+        raise HTTPException(400, "max_concurrent must be between 1 and 16")
+
+    with _scheduler_lock:
+        MAX_CONCURRENT = value
+    _schedule_queued()
+
+    return {
+        "status": "success",
+        "max_concurrent": MAX_CONCURRENT,
+        "running": len(_running_ids()),
+        "queued": len(OPTIMIZATION_QUEUE),
+    }
+
+
+@app.delete("/api/optimize/queue/{optimization_id}")
+async def cancel_queued_optimization(optimization_id: str):
+    """
+    Drop a run out of the queue before it starts.
+
+    A queued run that never executed leaves nothing worth keeping, so its
+    folder is removed too — but only if no batch ever produced anything, so a
+    queued *resume* never destroys the results it was going to build on.
+    """
+    with _scheduler_lock:
+        index = _queued_index(optimization_id)
+        if index < 0:
+            raise HTTPException(404, "That optimization is not queued")
+        OPTIMIZATION_QUEUE.pop(index)
+
+    opt_dir = _opt_dir(optimization_id)
+    runs_dir = os.path.join(opt_dir, "runs")
+    has_results = False
+    if os.path.isdir(runs_dir):
+        has_results = count_finished_batches(
+            runs_dir, len([d for d in os.listdir(runs_dir) if d.startswith("batch_")])
+        ) > 0
+
+    if not has_results and os.path.isdir(opt_dir):
+        shutil.rmtree(opt_dir, ignore_errors=True)
+    elif os.path.isdir(opt_dir):
+        snapshot = build_progress_snapshot(opt_dir)
+        snapshot["status"] = "interrupted"
+        atomic_write_json(os.path.join(opt_dir, "progress.json"), snapshot)
+
+    _schedule_queued()
+    return {"status": "cancelled", "optimization_id": optimization_id,
+            "removed": not has_results}
 
 
 @app.get("/api/optimize/active")
@@ -428,6 +710,7 @@ async def stream_progress(optimization_id: str):
     
     async def event_generator():
         last_data = ""
+        last_sent = time.monotonic()
         while True:
             if os.path.exists(progress_path):
                 try:
@@ -439,12 +722,22 @@ async def stream_progress(optimization_id: str):
                         progress = json.loads(data)
                         last_data = data
                         yield f"data: {json.dumps(progress)}\n\n"
+                        last_sent = time.monotonic()
 
                         if progress.get("status") in ("completed", "error", "stopped", "interrupted"):
                             yield f"data: {json.dumps({'status': 'done', 'final_status': progress.get('status'), 'resumable': bool(progress.get('resumable'))})}\n\n"
                             return
                 except Exception:
                     pass
+
+            # progress.json only changes when a batch finishes, and a batch can
+            # take minutes. With nothing on the wire the connection is dropped
+            # as idle, EventSource reconnects, and the client re-checks status —
+            # a reconnect storm for a run that is simply working. An SSE comment
+            # keeps it alive and is ignored by the browser.
+            if time.monotonic() - last_sent >= SSE_KEEPALIVE_SECONDS:
+                yield ": keepalive\n\n"
+                last_sent = time.monotonic()
 
             await asyncio.sleep(1)
     
@@ -465,6 +758,31 @@ async def stop_optimization(optimization_id: str):
     is left in a resumable 'stopped' state.
     """
     opt_dir = _opt_dir(optimization_id)
+
+    # A run still waiting for a slot has nothing to interrupt — just take it
+    # out of the queue.
+    with _scheduler_lock:
+        index = _queued_index(optimization_id)
+        if index >= 0:
+            OPTIMIZATION_QUEUE.pop(index)
+            dequeued = True
+        else:
+            dequeued = False
+
+    if dequeued:
+        if os.path.isdir(opt_dir):
+            snapshot = build_progress_snapshot(opt_dir)
+            snapshot["status"] = "interrupted"
+            try:
+                atomic_write_json(os.path.join(opt_dir, "progress.json"), snapshot)
+            except Exception:
+                pass
+        _schedule_queued()
+        return {
+            "status": "dequeued",
+            "optimization_id": optimization_id,
+            "message": "Removed from the queue before it started",
+        }
 
     if optimization_id in running_optimizations:
         running_optimizations[optimization_id]["stop_flag"].set()
@@ -651,8 +969,35 @@ async def get_batch_details(optimization_id: str, batch_id: str):
     xlsx_files = glob.glob(os.path.join(batch_dir, "*.xlsx"))
     result["has_report"] = len(xlsx_files) > 0
     result["report_files"] = [os.path.basename(f) for f in xlsx_files]
-    
+
+    # The parent run's settings — mode, workers, seed, ranking, swept ranges.
+    # Included so "load this batch back into the optimizer" needs one request
+    # instead of also pulling the full results table just to read the config.
+    result["config"] = _read_json(
+        os.path.join(_opt_dir(optimization_id), "optimization_config.json")
+    ) or {}
+
     return {"status": "success", "batch_id": batch_id, **result}
+
+
+@app.get("/api/optimizations/{optimization_id}/config")
+async def get_optimization_config(optimization_id: str):
+    """
+    Just the run's saved configuration.
+
+    The results endpoint also carries the config, but it loads and returns
+    every result row with it — far too much work when all the caller wants is
+    to restore the run's settings into the dashboard form.
+    """
+    opt_dir = _opt_dir(optimization_id)
+    if not os.path.isdir(opt_dir):
+        raise HTTPException(404, f"Optimization not found: {optimization_id}")
+
+    config = _read_json(os.path.join(opt_dir, "optimization_config.json"))
+    if not config:
+        raise HTTPException(404, "This run has no saved configuration")
+
+    return {"status": "success", "optimization_id": optimization_id, "config": config}
 
 
 @app.delete("/api/optimizations/{optimization_id}")
@@ -665,6 +1010,9 @@ async def delete_optimization(optimization_id: str):
     # Don't delete if running
     if _is_live(optimization_id):
         raise HTTPException(409, "Cannot delete a running optimization. Stop it first.")
+    with _scheduler_lock:
+        if _queued_index(optimization_id) >= 0:
+            raise HTTPException(409, "Cannot delete a queued optimization. Cancel it first.")
     running_optimizations.pop(optimization_id, None)
     
     shutil.rmtree(opt_dir)
@@ -712,6 +1060,10 @@ class SaveFavoriteRequest(BaseModel):
     review: str
     metrics: dict
     timestamp: str
+    # The batch's full parameter set, stored alongside the review so a saved
+    # entry still describes what it ran even if the run folder is deleted.
+    # Optional, so anything posting the older payload keeps working.
+    params: dict = {}
 
 @app.get("/api/user-data")
 async def get_user_data():
@@ -730,14 +1082,17 @@ async def save_favorite(req: SaveFavoriteRequest):
     existing = data["favorites"].get(key, {})
     metrics = req.metrics if req.metrics else existing.get("metrics", {})
     timestamp = req.timestamp if req.timestamp else existing.get("timestamp", "")
-    
+    # Editing a review must never wipe parameters captured on an earlier save.
+    params = req.params if req.params else existing.get("params", {})
+
     data["favorites"][key] = {
         "opt_id": req.opt_id,
         "batch_id": req.batch_id,
         "group": req.group,
         "review": req.review,
         "metrics": metrics,
-        "timestamp": timestamp
+        "timestamp": timestamp,
+        "params": params,
     }
     
     save_user_data(data)
@@ -1286,6 +1641,7 @@ async def stream_wfo_progress(run_id: str):
     """SSE stream of live WFO progress."""
     async def event_generator():
         last_data = ""
+        last_sent = time.monotonic()
         while True:
             progress = wfo_persistence.load_wfo_progress(run_id)
             if progress:
@@ -1293,11 +1649,19 @@ async def stream_wfo_progress(run_id: str):
                 if data != last_data:
                     last_data = data
                     yield f"data: {data}\n\n"
+                    last_sent = time.monotonic()
 
                     status = progress.get("status", "")
                     if status in ("completed", "error", "stopped"):
                         yield f"data: {json.dumps({'status': 'done'})}\n\n"
                         return
+
+            # A walk-forward step is a whole optimization, so this stream can be
+            # silent for far longer than the optimizer's. Same keepalive.
+            if time.monotonic() - last_sent >= SSE_KEEPALIVE_SECONDS:
+                yield ": keepalive\n\n"
+                last_sent = time.monotonic()
+
             await asyncio.sleep(1)
 
     return StreamingResponse(
