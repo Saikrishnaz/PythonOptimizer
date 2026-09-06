@@ -50,6 +50,79 @@ from . import persistence
 SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+# =============================================================================
+# DATE WINDOW HANDLING
+# =============================================================================
+#
+# A strategy receives its backtest window as ordinary parameters, so the date
+# window travels inside every parameter dict the walk-forward engine handles —
+# including the ones read back out of an optimization's results table. These
+# helpers are module level because the server needs exactly the same treatment
+# when it runs a candidate over the full sample.
+
+def date_param_keys(config: WFOConfig) -> set:
+    """
+    Every flat key through which this strategy receives its date window,
+    including the dotted forms the results table flattens a nested date
+    container into.
+
+    The nested container itself is deliberately absent: it can hold settings
+    besides the two dates, so it is edited in place rather than dropped.
+    """
+    keys = {"start_date", "end_date"}
+    name = config.date_param_name
+    if name:
+        keys.update({f"{name}.start_date", f"{name}.end_date"})
+    return keys
+
+
+def strip_date_params(config: WFOConfig, params: dict) -> dict:
+    """Remove any date window a parameter set is carrying, in place."""
+    for key in date_param_keys(config):
+        params.pop(key, None)
+
+    name = config.date_param_name
+    if name and isinstance(params.get(name), dict):
+        container = dict(params[name])
+        container.pop("start_date", None)
+        container.pop("end_date", None)
+        if container:
+            params[name] = container
+        else:
+            params.pop(name, None)
+    return params
+
+
+def apply_date_override(config: WFOConfig, params: dict,
+                        start_date: str, end_date: str) -> dict:
+    """
+    Stamp a date window onto a copy of an existing parameter dict.
+
+    Handles both flat (start_date/end_date) and nested
+    (Backtest_period.start_date/end_date) date parameter styles.
+    """
+    params = dict(params)
+
+    if config.date_param_style == "nested" and config.date_param_name:
+        # Nested style: e.g. Backtest_period = {start_date: ..., end_date: ...}
+        period_key = config.date_param_name
+        if period_key in params and isinstance(params[period_key], dict):
+            params[period_key] = dict(params[period_key])
+            params[period_key]["start_date"] = start_date
+            params[period_key]["end_date"] = end_date
+        else:
+            params[period_key] = {
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+    else:
+        # Flat style: start_date = ..., end_date = ...
+        params["start_date"] = start_date
+        params["end_date"] = end_date
+
+    return params
+
+
 class WalkForwardRunner:
     """
     Main Walk-Forward Testing orchestrator.
@@ -265,6 +338,13 @@ class WalkForwardRunner:
         for k in param_keys_to_remove:
             selected_params.pop(k, None)
 
+        # The selected row also carries the date parameters the IS batch ran
+        # with, because dates are passed to the strategy as ordinary fixed
+        # params. Those must not travel with the parameter set: merged over an
+        # OOS or full-sample configuration they would silently pull the run
+        # back onto the in-sample window.
+        self._strip_date_params(selected_params)
+
         step_result.selected_params = selected_params
         step_result.is_metrics = selection_info.get("metrics", {})
         step_result.is_score = selection_info.get("score", 0)
@@ -306,33 +386,16 @@ class WalkForwardRunner:
             message=f"Step {step}: Completed — OOS Profit: ${step_result.oos_net_profit:.2f}"
         )
 
+    def _strip_date_params(self, params: dict) -> dict:
+        return strip_date_params(self.config, params)
+
+    def _apply_date_override(self, params: dict, start_date: str, end_date: str) -> dict:
+        return apply_date_override(self.config, params, start_date, end_date)
+
     def _build_date_overridden_params(self, start_date: str, end_date: str) -> dict:
-        """
-        Build fixed params dict with date overrides.
-        
-        Handles both flat (start_date/end_date) and nested
-        (Backtest_period.start_date/end_date) date parameter styles.
-        """
-        params = dict(self.config.fixed_params)
-
-        if self.config.date_param_style == "nested" and self.config.date_param_name:
-            # Nested style: e.g. Backtest_period = {start_date: ..., end_date: ...}
-            period_key = self.config.date_param_name
-            if period_key in params and isinstance(params[period_key], dict):
-                params[period_key] = dict(params[period_key])
-                params[period_key]["start_date"] = start_date
-                params[period_key]["end_date"] = end_date
-            else:
-                params[period_key] = {
-                    "start_date": start_date,
-                    "end_date": end_date,
-                }
-        else:
-            # Flat style: start_date = ..., end_date = ...
-            params["start_date"] = start_date
-            params["end_date"] = end_date
-
-        return params
+        """Fixed params with the given date window stamped on."""
+        return apply_date_override(
+            self.config, dict(self.config.fixed_params), start_date, end_date)
 
     def _run_oos_backtest(
         self,
@@ -346,12 +409,20 @@ class WalkForwardRunner:
         Uses the existing worker subprocess pipeline
         without going through the full optimization engine.
         """
-        # Build the complete param set: fixed + frozen + OOS dates
-        oos_params = self._build_date_overridden_params(
-            window.oos_start, window.oos_end
-        )
-        # Merge frozen optimized params on top
+        # Build the complete param set: fixed + frozen, then OOS dates LAST.
+        #
+        # Order matters. The frozen set is read back out of the in-sample
+        # results table, so it can still carry that step's IS start/end dates —
+        # merging it over an already-dated dict would quietly re-run the
+        # in-sample window and report the result as out-of-sample. Selection
+        # strips those keys now, but resumed runs and older parameter files
+        # predate that, so the window is stamped on afterwards regardless.
+        oos_params = dict(self.config.fixed_params)
         oos_params.update(frozen_params)
+        oos_params = self._apply_date_override(
+            self._strip_date_params(oos_params),
+            window.oos_start, window.oos_end,
+        )
 
         # Create a temporary batch directory for the OOS run
         step_dir = persistence.get_step_dir(self.run_id, step)
@@ -486,6 +557,17 @@ class WalkForwardRunner:
             self.run_id, step_dicts, oos_aggregate,
             stability, robustness, candidates
         )
+
+        # Detailed report — written from the files just persisted. Import is
+        # local so the report module's own imports can never break a run that
+        # is otherwise finished, and failure here is logged rather than raised:
+        # the walk-forward results are already safe on disk.
+        try:
+            from .report import generate_report
+            generate_report(self.run_id)
+        except Exception as e:
+            print(f"[WFO] Report generation failed for {self.run_id}: "
+                  f"{type(e).__name__}: {e}")
 
         # Final progress update
         self._update_progress(
