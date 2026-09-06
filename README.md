@@ -23,6 +23,7 @@ and a standalone **chart explorer** for inspecting tick data.
 - [Ranking](#ranking)
 - [Progress, stop and resume](#progress-stop-and-resume)
 - [Output layout](#output-layout)
+- [Validating a result](#validating-a-result)
 - [HTTP API](#http-api)
 - [Troubleshooting](#troubleshooting)
 
@@ -113,10 +114,12 @@ child process.
 | [run_optimizer.py](run_optimizer.py) | Legacy standalone CLI optimizer |
 | [backtests/](backtests/) | Your strategy scripts — [README](backtests/README.md) |
 | [static/](static/) | Dashboard frontend — [README](static/README.md) |
-| [walk_forward/](walk_forward/) | Walk-forward testing engine — [README](walk_forward/README.md) |
+| [walk_forward/](walk_forward/) | Walk-forward testing engine, including the detailed post-run report — [README](walk_forward/README.md) |
+| [monte_carlo/](monte_carlo/) | Monte Carlo robustness analysis for any finished trade log — [README](monte_carlo/README.md) |
 | [Charts/](Charts/) | Standalone tick-data chart explorer — [README](Charts/README.md) |
 | `optimizations/` | **Created at runtime.** One folder per optimization run, plus `user_data.json` (saved/favourited runs and their groupings) |
 | `wfo_runs/` | **Created at runtime.** One folder per walk-forward run |
+| `monte_carlo_runs/` | **Created at runtime.** One folder per saved Monte Carlo run (small — summarised distributions, never the simulated paths) |
 | `runs/` | **Created at runtime.** Output of the legacy `run_optimizer.py` CLI only |
 
 `optimizations/` and `wfo_runs/` are output directories — the code creates them
@@ -348,6 +351,32 @@ Walk-forward output lives under `wfo_runs/` — see
 
 ---
 
+## Validating a result
+
+The optimizer's job is to find the best parameters on the data you gave it.
+That is not the same as finding parameters that will keep working, and the two
+tools that tell them apart both live in the dashboard.
+
+**Walk-forward** (`Walk-Forward` tab) optimizes on one window and measures on
+the next, so every reported number comes from data the optimizer had not seen.
+When a run finishes it generates a [detailed
+report](walk_forward/README.md#the-detailed-report): the combined out-of-sample
+equity curve, how much of the in-sample edge survived into each OOS window,
+parameter stability, and a written verdict. It also verifies that each step
+really ran on its assigned window before it says anything else.
+
+**Monte Carlo** (`Monte Carlo` tab) takes a finished trade log and resamples
+it — reshuffling the order, bootstrapping, dropping trades, adding cost noise —
+to show the distribution the single backtest was drawn from. It answers the
+question a backtest cannot: was this result the edge, or the draw? Its most
+useful input is a walk-forward run's combined out-of-sample trades, the only
+trades in the project chosen without seeing them. See
+[monte_carlo/README.md](monte_carlo/README.md).
+
+Neither predicts the future. Both narrow how wrong you can be about the past.
+
+---
+
 ## HTTP API
 
 ### Scripts
@@ -394,6 +423,20 @@ Walk-forward output lives under `wfo_runs/` — see
 `{id}/progress` (SSE), `{id}`, `{id}/windows`, `{id}/steps`, `{id}/results`,
 `{id}/parameters`, `{id}/candidates`, `{id}/full-sample`, `{id}/export/{type}`,
 and `DELETE {id}`.
+
+Plus the report: `{id}/report` (JSON, `?refresh=true` to rebuild),
+`{id}/report.html` (a standalone page), and `{id}/combined-trades` (every
+out-of-sample trade in walk-forward order).
+
+### Monte Carlo
+
+`/api/monte-carlo/` — `methods`, `sources`, `batches/{opt_id}`, `inspect`,
+`run`, `runs`, `runs/{id}`, and `DELETE runs/{id}`.
+
+Resamples a finished trade log — an optimization batch, a walk-forward run's
+combined out-of-sample trades, one of its steps, or any trade CSV — to show how
+much of a result was edge and how much was the draw. See
+[monte_carlo/README.md](monte_carlo/README.md).
 
 ### Saved runs
 
