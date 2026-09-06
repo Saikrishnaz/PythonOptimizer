@@ -7,9 +7,9 @@ Three files, no build step, no framework, no package manager:
 
 | File | Size | What it is |
 |---|---|---|
-| `index.html` | ~33 KB | Full page markup — sidebar, tabs, modals |
-| `app.js` | ~119 KB | All behaviour, in one IIFE on `DOMContentLoaded` |
-| `style.css` | ~42 KB | Dark theme, CSS custom properties |
+| `index.html` | ~43 KB | Full page markup — sidebar, tabs, modals |
+| `app.js` | ~206 KB | All behaviour, in one IIFE on `DOMContentLoaded` |
+| `style.css` | ~61 KB | Dark theme, CSS custom properties |
 
 Edit a file, reload the browser. That's the whole workflow.
 
@@ -70,7 +70,9 @@ The whole file is one `DOMContentLoaded` handler. Sections, in order:
 | **Excel viewer** | Renders a batch's `.xlsx` sheets as HTML tables |
 | **Load & edit** | Reload a past run's parameters back into the sidebar form |
 | **Saved backtests** | Star/group/annotate runs, persisted via `/api/user-data` |
-| **Walk-forward** | `class WalkForwardManager` — its own tab, wizard, and SSE stream |
+| **Inline SVG charts** | `sparkline()`, `bandChart()`, `histogramChart()` — dependency-free plots for the report and Monte Carlo. Lightweight Charts is loaded for OHLC candles and is the wrong tool for a static distribution plot |
+| **Walk-forward** | `class WalkForwardManager` — its own tab, wizard, SSE stream, and the detailed report panel (`loadReport` / `renderReport`) |
+| **Monte Carlo** | `class MonteCarloManager` — source picker, method selection, run, results, history. Entered from its own nav button, from a batch modal (`fromBatch`), or from a walk-forward run (`fromWfoRun`) |
 
 Functions the HTML calls via inline `onclick` are attached to `window`
 (`window.viewExcel`, `window.openSaveModal`, `window.loadOptimization`,
