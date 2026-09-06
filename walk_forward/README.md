@@ -57,6 +57,7 @@ reimplementing them, so IS optimization behaves identically to a normal run.
 | `aggregator.py` | Combines all OOS periods into one dataset; computes the robustness score |
 | `stability.py` | Parameter stability across steps; generates candidate parameter sets |
 | `persistence.py` | All file I/O, step state, and resume support |
+| `report.py` | The detailed post-run report — combined OOS equity, IS-vs-OOS efficiency, the out-of-sample integrity check, findings, and a standalone HTML page |
 
 ---
 
@@ -191,13 +192,15 @@ wfo_runs/
     │   └── oos_equity.csv
     ├── step_002/
     └── aggregate/
-        ├── combined_oos_trades.csv
-        ├── combined_oos_equity.csv
+        ├── combined_oos_trades.csv      # written by report.py
+        ├── combined_oos_equity.csv      # written by report.py
         ├── step_results.csv
         ├── parameter_stability.csv
         ├── robustness_score.json
         ├── candidates.json
-        └── final_summary.json
+        ├── final_summary.json
+        ├── report.json                  # the detailed report
+        └── report.html                  # the same report, standalone
 ```
 
 Each step's IS optimization is a normal optimization run, stored under
@@ -205,6 +208,61 @@ Each step's IS optimization is a normal optimization run, stored under
 tab like any other run.
 
 `wfo_runs/` is created on demand and may not exist in a fresh checkout.
+
+---
+
+## The detailed report
+
+`report.py` turns a finished run into a written assessment. The aggregate files
+answer *what were the numbers?*; the report answers *what do the numbers mean?*
+
+It is generated automatically at the end of `_finalize()`, and on demand for
+any run — including runs that finished before the module existed — the first
+time `/api/walk-forward/{id}/report` is asked for. Generation failure is logged,
+never raised: the walk-forward results are already safe on disk by then.
+
+### What it adds over the aggregate files
+
+- **A combined out-of-sample equity curve.** Every step's OOS trades stitched
+  into one chronological account. The per-step aggregate reports the worst
+  *single period* drawdown; a real account draws down across period boundaries,
+  and the difference is often large. The report flags it when it is.
+- **Walk-forward efficiency, per step and overall.** OOS profit *rate* divided
+  by IS profit *rate* — rates, not totals, because the IS window is normally
+  several times longer and comparing raw profit would make every step look
+  catastrophic. 1.00 means out-of-sample earned at the same rate the optimizer
+  found in-sample. Undefined (blank) when a step had no in-sample profit to
+  carry forward.
+- **An out-of-sample integrity check.** Every OOS run leaves the parameters it
+  was given on disk, so the report verifies each step actually ran on the
+  window it was assigned. This is the single property the whole method rests
+  on, and it is cheap to confirm.
+- **Findings.** Concrete, evidence-named observations — losing stretches,
+  unstable parameters, thin profit factors, drawdown chaining, small samples.
+- **A written summary** and a verdict with a recommendation.
+- **A monthly OOS breakdown**, for runs whose trade logs carry timestamps.
+
+### The integrity check
+
+If a step's OOS backtest ran a date range other than the one it was assigned,
+the report says so first, marks the verdict `Invalid — OOS Not Honoured`, and
+suppresses the efficiency findings — comparing a window against itself always
+looks like a perfect carry-over, and reporting that would contradict the
+warning.
+
+This check exists because that failure really happened. A parameter set
+selected from the IS results table carries the IS `start_date`/`end_date` with
+it, because dates reach a strategy as ordinary parameters. Merging that set
+over an already-dated OOS configuration overwrote the OOS window, so every
+"out-of-sample" result was the in-sample result repeated. Selection now strips
+date keys (`strip_date_params`), and the OOS window is stamped on *after* the
+merge (`apply_date_override`) so a stale date can never win. Runs made before
+that fix are detected and flagged rather than summarised as if they were valid.
+
+### Standalone HTML
+
+`report.html` is self-contained: inline CSS, inline SVG charts, no external
+requests. It can be saved, mailed or printed, and it renders offline.
 
 ---
 
@@ -240,7 +298,13 @@ Driven from the dashboard's Walk-Forward tab (`WalkForwardManager` in
 | `GET` | `/api/walk-forward/{id}/candidates` | Candidate parameter sets |
 | `POST` | `/api/walk-forward/{id}/full-sample` | Run a candidate over the whole dataset |
 | `GET` | `/api/walk-forward/{id}/export/{type}` | Export data |
+| `GET` | `/api/walk-forward/{id}/report` | The detailed report as JSON (`?refresh=true` rebuilds) |
+| `GET` | `/api/walk-forward/{id}/report.html` | The same report as a standalone page |
+| `GET` | `/api/walk-forward/{id}/combined-trades` | Every OOS trade, in walk-forward order |
 | `DELETE` | `/api/walk-forward/{id}` | Delete a run |
+
+A run is shareable from the dashboard: `#wfo=<run_id>` in the URL hash reopens
+the Walk-Forward tab on that run, and the report page has its own direct link.
 
 **Create is a two-step flow.** `POST /create` validates and returns a window
 preview for you to review; `POST /{id}/start` actually launches it.
