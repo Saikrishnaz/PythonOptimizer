@@ -104,6 +104,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else if (view === 'walkforward') {
                     switchTab('walkforward');
                     if (window.wfoManager) window.wfoManager.loadHistory();
+                } else if (view === 'montecarlo') {
+                    switchTab('montecarlo');
+                    if (window.mcManager) window.mcManager.activate();
                 } else {
                     switchTab('progress');
                 }
@@ -1743,6 +1746,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 JSON.stringify(params, null, 2), `${n} parameters copied`);
         }
 
+        // Monte Carlo needs this batch's trade log, which only exists if the
+        // strategy wrote one — the payload already says whether it did.
+        const mcBtn = document.getElementById('batchMonteCarloBtn');
+        if (mcBtn) {
+            mcBtn.disabled = !data.has_trades;
+            mcBtn.title = data.has_trades
+                ? 'Resample this batch’s trades'
+                : 'This batch kept no trade log to resample';
+            mcBtn.onclick = () => {
+                batchModal.classList.remove('active');
+                window.mcManager.fromBatch(optId, batchId);
+            };
+        }
+
         // Reuse the already-fetched payload instead of re-requesting the batch.
         const loadBtn = document.getElementById('batchLoadBtn');
         if (loadBtn) {
@@ -2006,6 +2023,113 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // =========================================================================
+    // INLINE SVG CHARTS
+    //
+    // Deliberately dependency-free. Lightweight Charts is loaded for the OHLC
+    // view and is the wrong tool for a static distribution plot, and pulling a
+    // second charting library in for a handful of polylines is not worth the
+    // page weight.
+    // =========================================================================
+
+    /** Scale a series into an SVG viewBox, returning point mappers. */
+    function chartScale(values, width, height, pad, extraMin, extraMax) {
+        let lo = Math.min(...values, ...(extraMin === undefined ? [] : [extraMin]));
+        let hi = Math.max(...values, ...(extraMax === undefined ? [] : [extraMax]));
+        if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+        if (hi - lo < 1e-9) hi = lo + 1;
+        return {
+            lo, hi,
+            x: (i, n) => pad + (n <= 1 ? 0 : i * (width - 2 * pad) / (n - 1)),
+            y: (v) => height - pad - (v - lo) * (height - 2 * pad) / (hi - lo),
+        };
+    }
+
+    /** An equity curve with a baseline. */
+    function sparkline(values, baseline, height = 200) {
+        if (!values || values.length < 2) return '';
+        const W = 1000, P = 6;
+        const s = chartScale(values, W, height, P, baseline, baseline);
+        const n = values.length;
+        const line = values.map((v, i) => `${s.x(i, n).toFixed(1)},${s.y(v).toFixed(1)}`).join(' ');
+        const up = values[values.length - 1] >= values[0];
+        const stroke = up ? 'var(--green)' : 'var(--red)';
+        const fill = up ? 'rgba(16,185,129,.14)' : 'rgba(239,68,68,.14)';
+        const base = s.y(baseline);
+        return `<div class="mc-chart"><svg viewBox="0 0 ${W} ${height}" preserveAspectRatio="none"
+            width="100%" height="${height}" role="img" aria-label="Equity curve">
+            <polygon points="${P},${height - P} ${line} ${W - P},${height - P}" fill="${fill}"/>
+            <line x1="${P}" y1="${base.toFixed(1)}" x2="${W - P}" y2="${base.toFixed(1)}"
+                  stroke="var(--text-muted)" stroke-dasharray="4 4" stroke-width="1"/>
+            <polyline points="${line}" fill="none" stroke="${stroke}" stroke-width="2"/>
+        </svg>
+        <div class="mc-chart-axis"><span>${formatValue(s.lo)}</span>
+        <span>dashed line = starting capital</span><span>${formatValue(s.hi)}</span></div></div>`;
+    }
+
+    /** Percentile bands: a shaded 5–95 range, a 25–75 core, and the median. */
+    function bandChart(bands, baseline, height = 230) {
+        if (!bands || !bands.p50 || bands.p50.length < 2) return '';
+        const W = 1000, P = 6;
+        const all = [...bands.p5, ...bands.p95];
+        const s = chartScale(all, W, height, P, baseline, baseline);
+        const n = bands.p50.length;
+        const pts = (arr, reverse) => {
+            const idx = [...arr.keys()];
+            if (reverse) idx.reverse();
+            return idx.map(i => `${s.x(i, n).toFixed(1)},${s.y(arr[i]).toFixed(1)}`).join(' ');
+        };
+        return `<div class="mc-chart"><svg viewBox="0 0 ${W} ${height}" preserveAspectRatio="none"
+            width="100%" height="${height}" role="img" aria-label="Simulated equity percentile bands">
+            <polygon points="${pts(bands.p5)} ${pts(bands.p95, true)}" fill="rgba(59,130,246,.13)"/>
+            <polygon points="${pts(bands.p25)} ${pts(bands.p75, true)}" fill="rgba(59,130,246,.22)"/>
+            <line x1="${P}" y1="${s.y(baseline).toFixed(1)}" x2="${W - P}" y2="${s.y(baseline).toFixed(1)}"
+                  stroke="var(--text-muted)" stroke-dasharray="4 4" stroke-width="1"/>
+            <polyline points="${pts(bands.p50)}" fill="none" stroke="var(--accent-blue)" stroke-width="2"/>
+        </svg>
+        <div class="mc-chart-axis"><span>${formatValue(s.lo)}</span>
+        <span>median · 25–75% · 5–95% of simulated outcomes</span>
+        <span>${formatValue(s.hi)}</span></div></div>`;
+    }
+
+    /** A histogram with the real backtest's value marked on it. */
+    function histogramChart(hist, actual, label, height = 170) {
+        if (!hist || !hist.counts || !hist.counts.length) return '';
+        // Some methods cannot vary a metric at all — a reorder never changes
+        // the total. Saying so is more use than a single spike.
+        if (hist.degenerate) {
+            return `<div class="mc-chart mc-chart-note">
+                Every simulation produced the same ${escapeHtml(label.toLowerCase())}
+                (<strong>${formatValue(hist.value)}</strong>) — this method cannot
+                vary it, so there is no distribution to plot.</div>`;
+        }
+        const W = 1000, P = 6;
+        const maxCount = Math.max(...hist.counts, 1);
+        const lo = hist.edges[0], hi = hist.edges[hist.edges.length - 1];
+        const span = (hi - lo) || 1;
+        const barW = (W - 2 * P) / hist.counts.length;
+        const bars = hist.counts.map((c, i) => {
+            const h = c / maxCount * (height - 2 * P);
+            const mid = (hist.edges[i] + hist.edges[i + 1]) / 2;
+            const color = mid >= 0 ? 'var(--green)' : 'var(--red)';
+            return `<rect x="${(P + i * barW).toFixed(1)}" y="${(height - P - h).toFixed(1)}"
+                width="${Math.max(barW - 1, 1).toFixed(1)}" height="${Math.max(h, 0.5).toFixed(1)}"
+                fill="${color}" opacity="0.75"/>`;
+        }).join('');
+        let marker = '';
+        if (actual !== undefined && actual !== null && actual >= lo && actual <= hi) {
+            const x = P + (actual - lo) / span * (W - 2 * P);
+            marker = `<line x1="${x.toFixed(1)}" y1="${P}" x2="${x.toFixed(1)}" y2="${height - P}"
+                stroke="var(--yellow)" stroke-width="2" stroke-dasharray="5 3"/>`;
+        }
+        return `<div class="mc-chart"><svg viewBox="0 0 ${W} ${height}" preserveAspectRatio="none"
+            width="100%" height="${height}" role="img" aria-label="${escapeAttr(label)} distribution">
+            ${bars}${marker}</svg>
+        <div class="mc-chart-axis"><span>${formatValue(lo)}</span>
+        <span>${escapeHtml(label)}${marker ? ' · dashed line = the actual backtest' : ''}</span>
+        <span>${formatValue(hi)}</span></div></div>`;
+    }
+
+    // =========================================================================
     // SHARING — clipboard + deep links
     // =========================================================================
 
@@ -2058,6 +2182,20 @@ document.addEventListener('DOMContentLoaded', () => {
     window.shareFolder = (name) =>
         copyToClipboard(buildShareLink(`folder=${encodeURIComponent(name)}`), 'Folder link copied');
 
+    window.shareWfoRun = (runId) =>
+        copyToClipboard(buildShareLink(`wfo=${encodeURIComponent(runId)}`),
+                        'Walk-Forward link copied');
+
+    /** A link straight to the standalone report page, for sending on. */
+    window.shareWfoReport = (runId) =>
+        copyToClipboard(
+            `${location.origin}/api/walk-forward/${encodeURIComponent(runId)}/report.html`,
+            'Report link copied');
+
+    window.shareMonteCarlo = (mcRunId) =>
+        copyToClipboard(buildShareLink(`mc=${encodeURIComponent(mcRunId)}`),
+                        'Monte Carlo link copied');
+
     /** Share whatever the Results tab is currently showing. */
     window.shareCurrentResults = () => {
         if (!selectedRunIds.length) {
@@ -2068,6 +2206,16 @@ document.addEventListener('DOMContentLoaded', () => {
             ? window.shareRun(selectedRunIds[0])
             : window.shareRuns(selectedRunIds);
     };
+
+    /**
+     * Light up the header button for a view a deep link jumped to.
+     * switchTab only moves the panel; without this the nav still highlights
+     * whatever was open before the link was followed.
+     */
+    function setActiveNav(view) {
+        document.querySelectorAll('.header-nav-btn').forEach(b =>
+            b.classList.toggle('active', b.dataset.view === view));
+    }
 
     /** Open whatever a shared link points at. */
     async function applyDeepLink() {
@@ -2104,6 +2252,20 @@ document.addEventListener('DOMContentLoaded', () => {
             } else if (key === 'folder') {
                 switchTab('saved');
                 renderSavedBacktests(dec(rawValue));
+            } else if (key === 'wfo') {
+                setActiveNav('walkforward');
+                switchTab('walkforward');
+                if (window.wfoManager) {
+                    window.wfoManager.loadHistory();
+                    await window.wfoManager.viewRun(dec(rawValue));
+                }
+            } else if (key === 'mc') {
+                setActiveNav('montecarlo');
+                switchTab('montecarlo');
+                if (window.mcManager) {
+                    await window.mcManager.activate();
+                    await window.mcManager.viewRun(dec(rawValue));
+                }
             }
         } catch (e) {
             showToast(`Could not open that link: ${e.message}`, 'error');
@@ -3177,6 +3339,159 @@ document.addEventListener('DOMContentLoaded', () => {
             } catch (e) {
                 console.error('Failed to load WFO results:', e);
             }
+            // The report is generated on first request and can take a moment on
+            // a long run, so it is fetched after the tables are already up.
+            this.loadReport(runId);
+        }
+
+        // ---------------------------------------------------------------------
+        // DETAILED REPORT
+        // ---------------------------------------------------------------------
+
+        async loadReport(runId, refresh = false) {
+            const section = document.getElementById('wfoReportSection');
+            const content = document.getElementById('wfoReportContent');
+            if (!section || !content) return;
+
+            section.style.display = 'block';
+            content.innerHTML = '<div class="mc-loading"><i class="fa-solid fa-circle-notch fa-spin"></i> Building report…</div>';
+            this.renderReportActions(runId);
+
+            try {
+                const url = `/api/walk-forward/${runId}/report${refresh ? '?refresh=true' : ''}`;
+                const res = await fetch(url);
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success') {
+                    content.innerHTML = `<div class="mc-empty">${escapeHtml(data.detail || 'Report unavailable for this run.')}</div>`;
+                    return;
+                }
+                this._report = data.report;
+                this.renderReport(data.report, runId);
+            } catch (e) {
+                content.innerHTML = `<div class="mc-empty">Could not load the report: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        renderReportActions(runId) {
+            const bar = document.getElementById('wfoReportActions');
+            if (!bar) return;
+            bar.innerHTML = `
+                <button class="btn btn-primary btn-sm" onclick="window.open('/api/walk-forward/${runId}/report.html','_blank')">
+                    <i class="fa-solid fa-up-right-from-square"></i> Open Full Report
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.shareWfoReport('${runId}')">
+                    <i class="fa-solid fa-link"></i> Copy Report Link
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.shareWfoRun('${runId}')">
+                    <i class="fa-solid fa-share-nodes"></i> Copy Run Link
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.wfoManager.loadReport('${runId}', true)">
+                    <i class="fa-solid fa-rotate"></i> Regenerate
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.open('/api/walk-forward/${runId}/report','_blank')">
+                    <i class="fa-solid fa-download"></i> JSON
+                </button>`;
+        }
+
+        renderReport(report, runId) {
+            const content = document.getElementById('wfoReportContent');
+            const verdict = report.verdict || {};
+            const integrity = report.integrity || {};
+            const combined = report.combined_oos || {};
+            const isOos = report.is_vs_oos || {};
+            const badge = String(verdict.label || '').toLowerCase().replace(/[^a-z]/g, '');
+
+            const num = (v, d = 2) => (v === null || v === undefined || isNaN(v))
+                ? '—' : Number(v).toLocaleString(undefined,
+                    { minimumFractionDigits: d, maximumFractionDigits: d });
+
+            let html = `
+                <div class="wfo-report-verdict">
+                    <div class="wfo-robustness-label ${badge}">
+                        ${escapeHtml(verdict.label || 'Unknown')} — ${num(verdict.score_pct, 1)}%
+                    </div>
+                    <div class="wfo-report-rec">${escapeHtml(verdict.recommendation || '')}</div>
+                </div>`;
+
+            if (integrity.status === 'mismatch') {
+                html += `<div class="mc-alarm">
+                    <div class="h"><i class="fa-solid fa-triangle-exclamation"></i> Out-of-sample windows were not honoured</div>
+                    <div class="b">${integrity.mismatched.length} of ${integrity.checked} steps ran their
+                    backtest on a different date range than the one they were meant to validate on.
+                    Every out-of-sample figure for this run describes data the optimizer had already
+                    seen. Re-run the walk-forward test before drawing conclusions from it.</div>
+                </div>`;
+            } else if (integrity.status === 'ok') {
+                html += `<div class="mc-verified"><i class="fa-solid fa-circle-check"></i>
+                    Out-of-sample windows verified on all ${integrity.verified} step(s).</div>`;
+            }
+
+            // Written summary
+            html += '<div class="wfo-report-summary">' +
+                (report.summary || []).map(p => `<p>${escapeHtml(p)}</p>`).join('') +
+                '</div>';
+
+            // Headline numbers measured on the combined OOS curve
+            const cards = [
+                ['Combined OOS Profit', num(combined.net_profit), (combined.net_profit || 0) >= 0 ? 'positive' : 'negative'],
+                ['OOS Trades', num(combined.total_trades, 0), ''],
+                ['Profit Factor', num(combined.profit_factor), ''],
+                ['Win Rate', num(combined.win_rate, 1) + '%', ''],
+                ['Max Drawdown', num(combined.max_drawdown), 'negative'],
+                ['Max DD %', num(combined.max_drawdown_pct, 1) + '%', 'negative'],
+                ['Expectancy / Trade', num(combined.expectancy), (combined.expectancy || 0) >= 0 ? 'positive' : 'negative'],
+                ['Recovery Factor', num(combined.recovery_factor), ''],
+                ['Longest Underwater', num(combined.longest_underwater_trades, 0) + ' trades', ''],
+                ['WF Efficiency', isOos.median_efficiency == null ? '—' : num(isOos.median_efficiency), ''],
+            ];
+            html += '<div class="wfo-summary-grid" style="margin-top:14px;">' + cards.map(([k, v, c]) =>
+                `<div class="wfo-metric-card"><div class="metric-label">${k}</div>
+                 <div class="metric-value ${c}">${v}</div></div>`).join('') + '</div>';
+
+            // Findings
+            const findings = report.findings || [];
+            if (findings.length) {
+                html += `<h4 class="wfo-report-h">Findings (${findings.length})</h4>
+                    <div class="mc-findings">` + findings.map(f =>
+                    `<div class="mc-finding ${escapeHtml(f.level)}">
+                        <div class="dot"></div>
+                        <div><div class="t">${escapeHtml(f.title)}</div>
+                        <div class="d">${escapeHtml(f.detail)}</div></div>
+                    </div>`).join('') + '</div>';
+            }
+
+            // IS vs OOS
+            const rows = (isOos.steps || []);
+            if (rows.length) {
+                html += `<h4 class="wfo-report-h">In-Sample vs Out-of-Sample</h4>
+                    <div style="overflow-x:auto;"><table class="wfo-steps-table">
+                    <thead><tr><th>Step</th><th>IS Profit</th><th>OOS Profit</th>
+                    <th>IS PF</th><th>OOS PF</th><th>IS Trades</th><th>OOS Trades</th>
+                    <th>Efficiency</th></tr></thead><tbody>` + rows.map(r => {
+                    const eff = r.efficiency;
+                    const effCls = eff == null ? '' : (eff >= 0.6 ? 'pos' : (eff < 0.3 ? 'neg' : ''));
+                    return `<tr>
+                        <td>${r.step}</td>
+                        <td class="${(r.is_net_profit || 0) >= 0 ? 'pos' : 'neg'}">${num(r.is_net_profit)}</td>
+                        <td class="${(r.oos_net_profit || 0) >= 0 ? 'pos' : 'neg'}">${num(r.oos_net_profit)}</td>
+                        <td>${num(r.is_profit_factor)}</td>
+                        <td>${num(r.oos_profit_factor)}</td>
+                        <td>${num(r.is_trades, 0)}</td>
+                        <td>${num(r.oos_trades, 0)}</td>
+                        <td class="${effCls}">${eff == null ? '—' : num(eff)}</td>
+                    </tr>`;
+                }).join('') + '</tbody></table></div>';
+            }
+
+            // Equity curve of the combined OOS account
+            const curve = report.equity_curve || [];
+            if (curve.length > 1) {
+                html += `<h4 class="wfo-report-h">Combined Out-of-Sample Equity</h4>` +
+                    sparkline(curve.map(p => p.equity),
+                              report.configuration?.initial_capital || 0);
+            }
+
+            content.innerHTML = html;
         }
 
         renderSteps(steps) {
@@ -3392,7 +3707,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 `<button class="btn btn-secondary btn-sm" onclick="window.open('/api/walk-forward/${runId}/export/${t}', '_blank')">
                     <i class="fa-solid fa-download"></i> ${t.charAt(0).toUpperCase() + t.slice(1)}
                 </button>`
-            ).join('');
+            ).join('') + `
+                <button class="btn btn-secondary btn-sm" onclick="window.open('/api/walk-forward/${runId}/combined-trades','_blank')">
+                    <i class="fa-solid fa-download"></i> Combined OOS Trades
+                </button>
+                <button class="btn btn-secondary btn-sm" onclick="window.shareWfoRun('${runId}')">
+                    <i class="fa-solid fa-link"></i> Copy Link
+                </button>`;
         }
 
         async loadHistory() {
@@ -3426,6 +3747,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         <td>${r.size_mb || 0} MB</td>
                         <td style="display:flex; gap:4px;">
                             <button class="btn btn-secondary btn-sm" onclick="window.wfoManager.viewRun('${r.run_id}')" title="View Results"><i class="fa-solid fa-eye"></i></button>
+                            <button class="btn btn-secondary btn-sm" onclick="window.open('/api/walk-forward/${r.run_id}/report.html','_blank')" title="Open Report"><i class="fa-solid fa-file-lines"></i></button>
+                            <button class="btn btn-secondary btn-sm" onclick="window.shareWfoRun('${r.run_id}')" title="Copy Shareable Link"><i class="fa-solid fa-link"></i></button>
+                            <button class="btn btn-secondary btn-sm" onclick="window.mcManager.fromWfoRun('${r.run_id}')" title="Run Monte Carlo on this run's OOS trades"><i class="fa-solid fa-dice"></i></button>
                             <button class="btn btn-danger btn-sm" onclick="window.wfoManager.deleteRun('${r.run_id}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
                         </td>
                     </tr>`;
@@ -3455,8 +3779,574 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // =========================================================================
+    // MONTE CARLO MODULE
+    //
+    // Takes one realised trade log and resamples it, so a backtest can be read
+    // as one draw from a distribution rather than as the answer. Sources are
+    // whatever the rest of the dashboard already produced: an optimization
+    // batch, a walk-forward run's combined out-of-sample trades, one of its
+    // steps, or any trade CSV on disk.
+    // =========================================================================
+    class MonteCarloManager {
+        constructor() {
+            this.methods = [];
+            this.selected = new Set(['resample', 'reorder']);
+            this.sources = { optimizations: [], wfo_runs: [] };
+            this.result = null;
+            this.loaded = false;
+            this.setupEventListeners();
+        }
+
+        setupEventListeners() {
+            const type = document.getElementById('mcSourceType');
+            if (type) type.addEventListener('change', () => this.syncSourceFields());
+
+            const opt = document.getElementById('mcOptSelect');
+            if (opt) opt.addEventListener('change', () => this.loadBatches(opt.value));
+
+            const run = document.getElementById('mcRunBtn');
+            if (run) run.addEventListener('click', () => this.run());
+
+            const inspect = document.getElementById('mcInspectBtn');
+            if (inspect) inspect.addEventListener('click', () => this.inspect());
+
+            ['mcSimulations', 'mcHorizon'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.addEventListener('input', () => this.updateEstimate());
+            });
+        }
+
+        /** First visit to the tab: fetch everything the pickers need. */
+        async activate() {
+            if (this.loaded) { this.loadHistory(); return; }
+            this.loaded = true;
+            await Promise.all([this.loadMethods(), this.loadSources()]);
+            this.syncSourceFields();
+            this.loadHistory();
+        }
+
+        async loadMethods() {
+            try {
+                const res = await fetch('/api/monte-carlo/methods');
+                const data = await res.json();
+                this.methods = data.methods || [];
+                this.maxSimulations = data.max_simulations || 200000;
+            } catch (e) {
+                this.methods = [];
+            }
+            this.renderMethods();
+        }
+
+        renderMethods() {
+            const box = document.getElementById('mcMethods');
+            if (!box) return;
+            box.innerHTML = this.methods.map(m => `
+                <label class="mc-method ${this.selected.has(m.id) ? 'on' : ''}" data-method="${escapeAttr(m.id)}">
+                    <input type="checkbox" ${this.selected.has(m.id) ? 'checked' : ''}
+                           data-method="${escapeAttr(m.id)}">
+                    <div>
+                        <div class="mc-method-label">${escapeHtml(m.label)}</div>
+                        <div class="mc-method-desc">${escapeHtml(m.description)}</div>
+                    </div>
+                </label>`).join('');
+
+            box.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    const id = cb.dataset.method;
+                    if (cb.checked) this.selected.add(id); else this.selected.delete(id);
+                    cb.closest('.mc-method').classList.toggle('on', cb.checked);
+                    this.updateEstimate();
+                });
+            });
+            this.updateEstimate();
+        }
+
+        async loadSources() {
+            try {
+                const res = await fetch('/api/monte-carlo/sources');
+                const data = await res.json();
+                this.sources = { optimizations: data.optimizations || [], wfo_runs: data.wfo_runs || [] };
+            } catch (e) {
+                this.sources = { optimizations: [], wfo_runs: [] };
+            }
+
+            const opt = document.getElementById('mcOptSelect');
+            if (opt) {
+                opt.innerHTML = '<option value="">— Select an optimization —</option>' +
+                    this.sources.optimizations.map(o =>
+                        `<option value="${escapeAttr(o.id)}">${escapeHtml(o.script_name || o.id)} — ${escapeHtml(o.id)}</option>`
+                    ).join('');
+            }
+            const wfo = document.getElementById('mcWfoSelect');
+            if (wfo) {
+                wfo.innerHTML = '<option value="">— Select a walk-forward run —</option>' +
+                    this.sources.wfo_runs.map(r =>
+                        `<option value="${escapeAttr(r.run_id)}">${escapeHtml(r.strategy_name || r.run_id)} — ${escapeHtml(r.run_id)} (${escapeHtml(r.status)})</option>`
+                    ).join('');
+            }
+        }
+
+        async loadBatches(optId) {
+            const sel = document.getElementById('mcBatchSelect');
+            if (!sel) return;
+            if (!optId) {
+                sel.innerHTML = '<option value="">— Select a run first —</option>';
+                return;
+            }
+            sel.innerHTML = '<option value="">Loading…</option>';
+            try {
+                const res = await fetch(`/api/monte-carlo/batches/${encodeURIComponent(optId)}`);
+                const data = await res.json();
+                const batches = data.batches || [];
+                if (!batches.length) {
+                    sel.innerHTML = '<option value="">No batch in this run kept a trade log</option>';
+                    return;
+                }
+                sel.innerHTML = batches.map(b => {
+                    const bits = [b.batch];
+                    if (b.net_profit != null) bits.push(`P/L ${formatValue(b.net_profit)}`);
+                    if (b.total_trades != null) bits.push(`${b.total_trades} trades`);
+                    return `<option value="${escapeAttr(b.batch)}">${escapeHtml(bits.join(' · '))}</option>`;
+                }).join('');
+            } catch (e) {
+                sel.innerHTML = '<option value="">Could not list batches</option>';
+            }
+        }
+
+        /** Show only the pickers the chosen source type needs. */
+        syncSourceFields() {
+            const type = document.getElementById('mcSourceType')?.value || 'batch';
+            const show = (id, on) => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = on ? '' : 'none';
+            };
+            show('mcOptGroup', type === 'batch');
+            show('mcBatchGroup', type === 'batch');
+            show('mcWfoGroup', type === 'wfo' || type === 'wfo_step');
+            show('mcStepGroup', type === 'wfo_step');
+            show('mcCsvGroup', type === 'csv');
+        }
+
+        currentSource() {
+            const type = document.getElementById('mcSourceType')?.value || 'batch';
+            if (type === 'batch') {
+                return {
+                    type: 'batch',
+                    optimization_id: document.getElementById('mcOptSelect')?.value || '',
+                    batch_id: document.getElementById('mcBatchSelect')?.value || '',
+                };
+            }
+            if (type === 'wfo') {
+                return { type: 'wfo', run_id: document.getElementById('mcWfoSelect')?.value || '' };
+            }
+            if (type === 'wfo_step') {
+                return {
+                    type: 'wfo_step',
+                    run_id: document.getElementById('mcWfoSelect')?.value || '',
+                    step: parseInt(document.getElementById('mcStepInput')?.value) || 1,
+                };
+            }
+            return { type: 'csv', path: document.getElementById('mcCsvPath')?.value || '' };
+        }
+
+        currentConfig() {
+            const num = (id, fallback) => {
+                const raw = document.getElementById(id)?.value;
+                const v = parseFloat(raw);
+                return (raw === '' || isNaN(v)) ? fallback : v;
+            };
+            const horizonRaw = document.getElementById('mcHorizon')?.value;
+            return {
+                source: this.currentSource(),
+                methods: [...this.selected],
+                simulations: num('mcSimulations', 2000),
+                initial_capital: num('mcCapital', 100000),
+                seed: num('mcSeed', 42),
+                keep_pct: num('mcKeepPct', 90),
+                noise_pct: num('mcNoisePct', 10),
+                block_size: num('mcBlockSize', 10),
+                horizon: horizonRaw ? parseInt(horizonRaw) : null,
+                ruin_pct: num('mcRuinPct', 50),
+                dd_limit_pct: num('mcDdLimit', 20),
+            };
+        }
+
+        /**
+         * Rough size of the job. Cost scales with simulations × trades ×
+         * methods, and a user asking for 100k simulations deserves to know
+         * before they wait for it.
+         */
+        updateEstimate() {
+            const box = document.getElementById('mcEstimate');
+            if (!box) return;
+            const sims = parseInt(document.getElementById('mcSimulations')?.value) || 0;
+            const trades = this.sourceTrades || 0;
+            const methods = this.selected.size;
+            if (!sims || !methods) { box.style.display = 'none'; return; }
+
+            if (!trades) {
+                box.style.display = 'block';
+                box.innerHTML = `<div><strong>${sims.toLocaleString()}</strong> simulations ×
+                    <strong>${methods}</strong> method(s). Inspect the source to size the job.</div>`;
+                return;
+            }
+            const cells = sims * trades * methods;
+            // ~11M cells/second measured on this project's own trade logs; the
+            // figure is a guide, not a promise.
+            const seconds = Math.max(cells / 11e6, 0.1);
+            box.style.display = 'block';
+            box.innerHTML = `<div><strong>${(cells / 1e6).toFixed(1)}M</strong> simulated trades
+                (${sims.toLocaleString()} × ${trades.toLocaleString()} × ${methods}) —
+                roughly <strong>${formatDuration(seconds)}</strong>${cells > 4e8 ? ' <span style="color:var(--yellow);">· that is a big job</span>' : ''}</div>`;
+        }
+
+        async inspect() {
+            const info = document.getElementById('mcSourceInfo');
+            if (info) info.innerHTML = '<div class="mc-loading"><i class="fa-solid fa-circle-notch fa-spin"></i> Reading trade log…</div>';
+            try {
+                const res = await fetch('/api/monte-carlo/inspect', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(this.currentConfig()),
+                });
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success') {
+                    if (info) info.innerHTML = `<div class="mc-source-error"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(data.detail || 'Could not read that source.')}</div>`;
+                    this.sourceTrades = 0;
+                    this.updateEstimate();
+                    return null;
+                }
+                this.sourceTrades = data.total_trades;
+                const a = data.actual || {};
+                if (info) {
+                    info.innerHTML = `<div class="mc-source-ok">
+                        <i class="fa-solid fa-circle-check"></i>
+                        <strong>${escapeHtml(data.label)}</strong> —
+                        ${data.total_trades.toLocaleString()} trades,
+                        net ${formatValue(a.net_profit)},
+                        PF ${formatValue(a.profit_factor)},
+                        win rate ${formatValue(a.win_rate)}%,
+                        max DD ${formatValue(a.max_drawdown)} (${formatValue(a.max_drawdown_pct)}%)
+                    </div>`;
+                }
+                this.updateEstimate();
+                return data;
+            } catch (e) {
+                if (info) info.innerHTML = `<div class="mc-source-error">${escapeHtml(e.message)}</div>`;
+                return null;
+            }
+        }
+
+        async run() {
+            if (!this.selected.size) {
+                showToast('Pick at least one simulation method', 'warning');
+                return;
+            }
+            const btn = document.getElementById('mcRunBtn');
+            const section = document.getElementById('mcResultsSection');
+            const content = document.getElementById('mcResultsContent');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> Simulating…'; }
+            if (section) section.style.display = 'block';
+            if (content) content.innerHTML = '<div class="mc-loading"><i class="fa-solid fa-circle-notch fa-spin"></i> Running simulations…</div>';
+
+            try {
+                const res = await fetch('/api/monte-carlo/run', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...this.currentConfig(), save: true }),
+                });
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success') {
+                    if (content) content.innerHTML = `<div class="mc-source-error"><i class="fa-solid fa-circle-exclamation"></i> ${escapeHtml(data.detail || 'Simulation failed.')}</div>`;
+                    showToast(data.detail || 'Simulation failed', 'error');
+                    return;
+                }
+                this.result = data.result;
+                this.sourceTrades = data.result.input?.total_trades || this.sourceTrades;
+                this.renderResults(data.result, data.run_id);
+                this.loadHistory();
+                showToast(`Monte Carlo complete in ${data.result.elapsed_seconds}s`, 'success');
+            } catch (e) {
+                if (content) content.innerHTML = `<div class="mc-source-error">${escapeHtml(e.message)}</div>`;
+                showToast('Simulation request failed', 'error');
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-dice"></i> Run Simulation'; }
+            }
+        }
+
+        renderResults(result, runId) {
+            const section = document.getElementById('mcResultsSection');
+            const content = document.getElementById('mcResultsContent');
+            const actions = document.getElementById('mcResultsActions');
+            if (!content) return;
+            section.style.display = 'block';
+
+            const cfg = result.config || {};
+            const actual = result.actual || {};
+            const capital = cfg.initial_capital || 0;
+            const num = (v, d = 2) => (v === null || v === undefined || isNaN(v))
+                ? '—' : Number(v).toLocaleString(undefined,
+                    { minimumFractionDigits: d, maximumFractionDigits: d });
+
+            if (actions) {
+                actions.innerHTML = (runId ? `
+                    <button class="btn btn-secondary btn-sm" onclick="window.shareMonteCarlo('${runId}')">
+                        <i class="fa-solid fa-link"></i> Copy Link
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="window.open('/api/monte-carlo/runs/${runId}','_blank')">
+                        <i class="fa-solid fa-download"></i> JSON
+                    </button>` : '') + `
+                    <button class="btn btn-secondary btn-sm" onclick="window.mcManager.copyResult()">
+                        <i class="fa-solid fa-copy"></i> Copy Summary
+                    </button>`;
+            }
+
+            // ---- what the real backtest did, for reference ----
+            let html = `<div class="mc-actual">
+                <div class="mc-actual-head">The backtest as it happened —
+                    <span class="mono">${escapeHtml(result.source_label || '')}</span></div>
+                <div class="wfo-summary-grid">
+                    ${[['Net Profit', num(actual.net_profit), (actual.net_profit || 0) >= 0 ? 'positive' : 'negative'],
+                       ['Trades', num(actual.total_trades, 0), ''],
+                       ['Profit Factor', num(actual.profit_factor), ''],
+                       ['Win Rate', num(actual.win_rate, 1) + '%', ''],
+                       ['Max Drawdown', num(actual.max_drawdown), 'negative'],
+                       ['Max DD %', num(actual.max_drawdown_pct, 1) + '%', 'negative']]
+                      .map(([k, v, c]) => `<div class="wfo-metric-card"><div class="metric-label">${k}</div>
+                        <div class="metric-value ${c}">${v}</div></div>`).join('')}
+                </div></div>`;
+
+            // ---- findings ----
+            const findings = result.findings || [];
+            if (findings.length) {
+                html += `<h4 class="wfo-report-h">What the simulations say (${findings.length})</h4>
+                    <div class="mc-findings">` + findings.map(f =>
+                    `<div class="mc-finding ${escapeHtml(f.level)}"><div class="dot"></div>
+                     <div><div class="t">${escapeHtml(f.title)}</div>
+                     <div class="d">${escapeHtml(f.detail)}</div></div></div>`).join('') + '</div>';
+            }
+
+            // ---- one block per method ----
+            for (const [id, res] of Object.entries(result.results || {})) {
+                const p = res.probabilities || {};
+                const risk = res.risk || {};
+                const m = res.metrics || {};
+                const rank = res.actual_percentile || {};
+
+                html += `<div class="mc-method-result">
+                    <div class="mc-method-head">
+                        <div>
+                            <div class="mc-method-title">${escapeHtml(res.label)}</div>
+                            <div class="mc-method-sub">${escapeHtml(res.description)}</div>
+                        </div>
+                        <div class="mc-method-count">${res.simulations.toLocaleString()} simulations
+                            × ${res.horizon.toLocaleString()} trades</div>
+                    </div>
+
+                    <div class="wfo-summary-grid">
+                        ${[['P(profit)', num(p.profit, 1) + '%', p.profit >= 75 ? 'positive' : (p.profit < 50 ? 'negative' : '')],
+                           ['P(ruin)', num(p.ruin, 2) + '%', p.ruin > 0 ? 'negative' : 'positive'],
+                           [`P(DD > ${num(cfg.dd_limit_pct, 0)}%)`, num(p.dd_exceeds_limit, 1) + '%',
+                            p.dd_exceeds_limit >= 25 ? 'negative' : ''],
+                           ['Median Profit', num(m.net_profit?.percentiles?.['50']), ''],
+                           ['5th %ile Profit', num(m.net_profit?.percentiles?.['5']), 'negative'],
+                           ['95th %ile Profit', num(m.net_profit?.percentiles?.['95']), 'positive'],
+                           ['Median Max DD', num(risk.median_drawdown_pct, 1) + '%', 'negative'],
+                           ['Worst Max DD', num(risk.worst_case_drawdown_pct, 1) + '%', 'negative'],
+                           ['CVaR 95', num(risk.cvar_95), 'negative'],
+                           ['Backtest Percentile', num(rank.net_profit, 0) + 'th',
+                            rank.net_profit >= 90 ? 'negative' : '']]
+                          .map(([k, v, c]) => `<div class="wfo-metric-card"><div class="metric-label">${k}</div>
+                            <div class="metric-value ${c}">${v}</div></div>`).join('')}
+                    </div>
+
+                    <div class="mc-charts">
+                        <div>
+                            <div class="mc-chart-title">Simulated equity range</div>
+                            ${bandChart(res.equity_bands, capital)}
+                        </div>
+                        <div>
+                            <div class="mc-chart-title">Distribution of final profit</div>
+                            ${histogramChart(res.histograms?.net_profit, actual.net_profit, 'Net profit')}
+                        </div>
+                        <div>
+                            <div class="mc-chart-title">Distribution of maximum drawdown</div>
+                            ${histogramChart(res.histograms?.max_drawdown_pct, actual.max_drawdown_pct, 'Max drawdown %')}
+                        </div>
+                    </div>
+
+                    <details class="mc-percentiles"><summary>Percentile table</summary>
+                        ${this.percentileTable(m)}
+                    </details>
+                </div>`;
+            }
+
+            content.innerHTML = html;
+        }
+
+        percentileTable(metrics) {
+            const rows = [
+                ['net_profit', 'Net Profit', 2],
+                ['max_drawdown', 'Max Drawdown', 2],
+                ['max_drawdown_pct', 'Max Drawdown %', 2],
+                ['profit_factor', 'Profit Factor', 3],
+                ['win_rate', 'Win Rate %', 2],
+                ['sharpe_ratio', 'Sharpe Ratio', 3],
+            ];
+            const levels = ['1', '5', '10', '25', '50', '75', '90', '95', '99'];
+            const fmt = (v, d) => (v === null || v === undefined || isNaN(v)) ? '—'
+                : Number(v).toLocaleString(undefined, { minimumFractionDigits: d, maximumFractionDigits: d });
+
+            return `<div style="overflow-x:auto;"><table class="wfo-steps-table">
+                <thead><tr><th style="text-align:left;">Metric</th>
+                ${levels.map(l => `<th>p${l}</th>`).join('')}
+                <th>Mean</th><th>Std</th></tr></thead><tbody>` +
+                rows.map(([key, label, d]) => {
+                    const s = metrics[key];
+                    if (!s || !s.percentiles) return '';
+                    return `<tr><td style="text-align:left;font-weight:600;">${label}</td>` +
+                        levels.map(l => `<td>${fmt(s.percentiles[l], d)}</td>`).join('') +
+                        `<td>${fmt(s.mean, d)}</td><td>${fmt(s.std, d)}</td></tr>`;
+                }).join('') + '</tbody></table></div>';
+        }
+
+        copyResult() {
+            if (!this.result) { showToast('Run a simulation first', 'warning'); return; }
+            const r = this.result;
+            const lines = [
+                `Monte Carlo — ${r.source_label}`,
+                `${r.input.total_trades} trades · ${r.config.simulations} simulations · seed ${r.config.seed}`,
+                '',
+                `Actual: net ${r.actual.net_profit}, PF ${r.actual.profit_factor}, ` +
+                `win rate ${r.actual.win_rate}%, max DD ${r.actual.max_drawdown} (${r.actual.max_drawdown_pct}%)`,
+                '',
+            ];
+            for (const [, res] of Object.entries(r.results)) {
+                const p = res.probabilities, m = res.metrics.net_profit.percentiles;
+                lines.push(`${res.label}:`);
+                lines.push(`  P(profit) ${p.profit}%   P(ruin) ${p.ruin}%   P(DD>limit) ${p.dd_exceeds_limit}%`);
+                lines.push(`  Profit p5 ${m['5']}   p50 ${m['50']}   p95 ${m['95']}`);
+                lines.push(`  Worst drawdown ${res.risk.worst_case_drawdown_pct}%   CVaR95 ${res.risk.cvar_95}`);
+                lines.push(`  The real backtest sits at the ${res.actual_percentile.net_profit}th percentile`);
+                lines.push('');
+            }
+            copyToClipboard(lines.join('\n'), 'Monte Carlo summary copied');
+        }
+
+        async loadHistory() {
+            const box = document.getElementById('mcHistoryContent');
+            if (!box) return;
+            try {
+                const res = await fetch('/api/monte-carlo/runs');
+                const data = await res.json();
+                const runs = data.runs || [];
+                if (!runs.length) {
+                    box.innerHTML = `<div class="empty-state" style="padding:32px; text-align:center;">
+                        <i class="fa-solid fa-dice" style="font-size:28px; color:var(--text-muted); margin-bottom:10px;"></i>
+                        <h3 style="color:var(--text-heading); margin:0 0 6px;">No Simulations Yet</h3>
+                        <p style="color:var(--text-secondary); font-size:13px;">Pick a trade source above and run one.</p>
+                    </div>`;
+                    return;
+                }
+                box.innerHTML = `<table class="wfo-preview-table"><thead><tr>
+                    <th>Run</th><th>Source</th><th>Methods</th><th>Sims</th><th>Trades</th>
+                    <th>P(profit)</th><th>Took</th><th>Actions</th></tr></thead><tbody>` +
+                    runs.map(r => `<tr>
+                        <td style="font-family:'JetBrains Mono',monospace; font-size:10px;">${escapeHtml(r.run_id)}</td>
+                        <td style="font-size:11px;">${escapeHtml(r.source_label || '')}</td>
+                        <td style="font-size:11px;">${escapeHtml((r.methods || []).join(', '))}</td>
+                        <td>${(r.simulations || 0).toLocaleString()}</td>
+                        <td>${(r.total_trades || 0).toLocaleString()}</td>
+                        <td>${r.prob_profit == null ? '—' : r.prob_profit + '%'}</td>
+                        <td>${r.elapsed_seconds == null ? '—' : r.elapsed_seconds + 's'}</td>
+                        <td style="display:flex; gap:4px;">
+                            <button class="btn btn-secondary btn-sm" onclick="window.mcManager.viewRun('${r.run_id}')" title="View"><i class="fa-solid fa-eye"></i></button>
+                            <button class="btn btn-secondary btn-sm" onclick="window.shareMonteCarlo('${r.run_id}')" title="Copy Link"><i class="fa-solid fa-link"></i></button>
+                            <button class="btn btn-danger btn-sm" onclick="window.mcManager.deleteRun('${r.run_id}')" title="Delete"><i class="fa-solid fa-trash"></i></button>
+                        </td></tr>`).join('') + '</tbody></table>';
+            } catch (e) {
+                box.innerHTML = '<div class="mc-source-error">Could not load history.</div>';
+            }
+        }
+
+        async viewRun(mcRunId) {
+            try {
+                const res = await fetch(`/api/monte-carlo/runs/${encodeURIComponent(mcRunId)}`);
+                const data = await res.json();
+                if (!res.ok || data.status !== 'success') {
+                    showToast(data.detail || 'Monte Carlo run not found', 'error');
+                    return;
+                }
+                this.result = data.result;
+                this.renderResults(data.result, mcRunId);
+                document.getElementById('mcResultsSection')
+                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            } catch (e) {
+                showToast('Could not load that run', 'error');
+            }
+        }
+
+        async deleteRun(mcRunId) {
+            if (!confirm(`Delete Monte Carlo run ${mcRunId}?`)) return;
+            try {
+                await fetch(`/api/monte-carlo/runs/${encodeURIComponent(mcRunId)}`, { method: 'DELETE' });
+                showToast('Monte Carlo run deleted', 'success');
+                this.loadHistory();
+            } catch (e) {
+                showToast('Delete failed', 'error');
+            }
+        }
+
+        /** Jump here from elsewhere in the dashboard with the source preselected. */
+        async openWith(setup) {
+            setActiveNav('montecarlo');
+            switchTab('montecarlo');
+            await this.activate();
+            // Awaited: fromBatch has to fetch the batch list before it can
+            // select one, and inspect() below reads whatever is selected.
+            await setup();
+            this.syncSourceFields();
+            await this.inspect();
+            document.getElementById('mcSourceSection')
+                ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
+        fromWfoRun(runId) {
+            return this.openWith(() => {
+                document.getElementById('mcSourceType').value = 'wfo';
+                const sel = document.getElementById('mcWfoSelect');
+                if (sel && ![...sel.options].some(o => o.value === runId)) {
+                    sel.insertAdjacentHTML('beforeend',
+                        `<option value="${escapeAttr(runId)}">${escapeHtml(runId)}</option>`);
+                }
+                if (sel) sel.value = runId;
+            });
+        }
+
+        async fromBatch(optId, batchId) {
+            return this.openWith(async () => {
+                document.getElementById('mcSourceType').value = 'batch';
+                const opt = document.getElementById('mcOptSelect');
+                if (opt && ![...opt.options].some(o => o.value === optId)) {
+                    opt.insertAdjacentHTML('beforeend',
+                        `<option value="${escapeAttr(optId)}">${escapeHtml(optId)}</option>`);
+                }
+                if (opt) opt.value = optId;
+                await this.loadBatches(optId);
+                const batch = document.getElementById('mcBatchSelect');
+                if (batch) {
+                    if (![...batch.options].some(o => o.value === batchId)) {
+                        batch.insertAdjacentHTML('beforeend',
+                            `<option value="${escapeAttr(batchId)}">${escapeHtml(batchId)}</option>`);
+                    }
+                    batch.value = batchId;
+                }
+            });
+        }
+    }
+
     // Initialize WFO Manager
     window.wfoManager = new WalkForwardManager();
+    window.mcManager = new MonteCarloManager();
 
     // Hook into existing analysis callback to pass data to WFO
     const _origHandleAnalysis = window._handleAnalysisResult;
