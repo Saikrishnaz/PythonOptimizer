@@ -39,6 +39,9 @@
                 <button class="header-nav-btn" data-view="walkforward" id="navWalkForward">
                     <i class="fa-solid fa-forward"></i> Walk-Forward
                 </button>
+                <button class="header-nav-btn" data-view="montecarlo" id="navMonteCarlo">
+                    <i class="fa-solid fa-dice"></i> Monte Carlo
+                </button>
             </div>
             <div class="header-right">
                 <div class="header-status">
@@ -442,6 +445,13 @@
                             <div id="wfoFullSampleContent"></div>
                         </div>
 
+                        <!-- Detailed Report -->
+                        <div class="wfo-section" id="wfoReportSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-file-lines"></i> Detailed Report</div>
+                            <div class="wfo-export-bar" id="wfoReportActions"></div>
+                            <div id="wfoReportContent"></div>
+                        </div>
+
                         <!-- Export -->
                         <div class="wfo-section" id="wfoExportSection" style="display:none;">
                             <div class="wfo-section-title"><i class="fa-solid fa-download"></i> Export</div>
@@ -452,6 +462,125 @@
                         <div class="wfo-section" id="wfoHistorySection">
                             <div class="wfo-section-title"><i class="fa-solid fa-clock-rotate-left"></i> Walk-Forward History</div>
                             <div id="wfoHistoryContent"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: MONTE CARLO -->
+                <div class="tab-content" data-tab="montecarlo" id="montecarloTab">
+                    <div class="wfo-container" id="mcContainer">
+                        <!-- Trade Source -->
+                        <div class="wfo-section" id="mcSourceSection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-database"></i> Trade Source</div>
+                            <div class="mc-intro">
+                                A backtest is one sample from a distribution of possible outcomes.
+                                Monte Carlo resamples the trades that actually happened to show the
+                                rest of that distribution — how much of the result was edge, and how
+                                much was the order the trades arrived in.
+                            </div>
+                            <div class="wfo-config-grid">
+                                <div class="wfo-config-group">
+                                    <label>Source Type</label>
+                                    <select id="mcSourceType">
+                                        <option value="batch">Optimization Batch</option>
+                                        <option value="wfo">Walk-Forward — Combined OOS</option>
+                                        <option value="wfo_step">Walk-Forward — Single Step</option>
+                                        <option value="csv">Trade CSV File</option>
+                                    </select>
+                                </div>
+                                <div class="wfo-config-group" id="mcOptGroup">
+                                    <label>Optimization Run</label>
+                                    <select id="mcOptSelect"><option value="">— Select —</option></select>
+                                </div>
+                                <div class="wfo-config-group" id="mcBatchGroup">
+                                    <label>Batch</label>
+                                    <select id="mcBatchSelect"><option value="">— Select a run first —</option></select>
+                                </div>
+                                <div class="wfo-config-group" id="mcWfoGroup">
+                                    <label>Walk-Forward Run</label>
+                                    <select id="mcWfoSelect"><option value="">— Select —</option></select>
+                                </div>
+                                <div class="wfo-config-group" id="mcStepGroup">
+                                    <label>Step Number</label>
+                                    <input type="number" id="mcStepInput" value="1" min="1" max="200">
+                                </div>
+                                <div class="wfo-config-group" id="mcCsvGroup">
+                                    <label>Trade CSV Path</label>
+                                    <input type="text" id="mcCsvPath" placeholder="C:\path\to\trades.csv">
+                                </div>
+                            </div>
+                            <div id="mcSourceInfo" class="mc-source-info"></div>
+                        </div>
+
+                        <!-- Methods -->
+                        <div class="wfo-section" id="mcMethodsSection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-shuffle"></i> Simulation Methods</div>
+                            <div id="mcMethods" class="mc-method-grid"></div>
+                        </div>
+
+                        <!-- Settings -->
+                        <div class="wfo-section" id="mcSettingsSection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-sliders"></i> Simulation Settings</div>
+                            <div class="wfo-config-grid">
+                                <div class="wfo-config-group">
+                                    <label>Simulations</label>
+                                    <input type="number" id="mcSimulations" value="2000" min="100" max="200000" step="100">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Starting Capital</label>
+                                    <input type="number" id="mcCapital" value="100000" min="1" step="1000">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Random Seed</label>
+                                    <input type="number" id="mcSeed" value="42">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Trades per Run <span class="mc-hint">(blank = same as source)</span></label>
+                                    <input type="number" id="mcHorizon" min="1" placeholder="as source">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Ruin Threshold % <span class="mc-hint">(capital lost)</span></label>
+                                    <input type="number" id="mcRuinPct" value="50" min="1" max="100" step="1">
+                                </div>
+                                <div class="wfo-config-group">
+                                    <label>Drawdown Limit % <span class="mc-hint">(your tolerance)</span></label>
+                                    <input type="number" id="mcDdLimit" value="20" min="0.1" max="100" step="0.5">
+                                </div>
+                                <div class="wfo-config-group" id="mcKeepGroup">
+                                    <label>Trades Kept % <span class="mc-hint">(skip method)</span></label>
+                                    <input type="number" id="mcKeepPct" value="90" min="1" max="100" step="1">
+                                </div>
+                                <div class="wfo-config-group" id="mcNoiseGroup">
+                                    <label>P&amp;L Noise % <span class="mc-hint">(noise method)</span></label>
+                                    <input type="number" id="mcNoisePct" value="10" min="0" max="100" step="1">
+                                </div>
+                                <div class="wfo-config-group" id="mcBlockGroup">
+                                    <label>Block Size <span class="mc-hint">(block bootstrap)</span></label>
+                                    <input type="number" id="mcBlockSize" value="10" min="1" step="1">
+                                </div>
+                            </div>
+                            <div class="wfo-actions">
+                                <div id="mcEstimate" class="opt-estimates" style="display:none;"></div>
+                                <button class="btn btn-secondary" id="mcInspectBtn">
+                                    <i class="fa-solid fa-magnifying-glass"></i> Inspect Source
+                                </button>
+                                <button class="btn btn-success" id="mcRunBtn">
+                                    <i class="fa-solid fa-dice"></i> Run Simulation
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Results -->
+                        <div class="wfo-section" id="mcResultsSection" style="display:none;">
+                            <div class="wfo-section-title"><i class="fa-solid fa-chart-area"></i> Simulation Results</div>
+                            <div class="wfo-export-bar" id="mcResultsActions"></div>
+                            <div id="mcResultsContent"></div>
+                        </div>
+
+                        <!-- History -->
+                        <div class="wfo-section" id="mcHistorySection">
+                            <div class="wfo-section-title"><i class="fa-solid fa-clock-rotate-left"></i> Monte Carlo History</div>
+                            <div id="mcHistoryContent"></div>
                         </div>
                     </div>
                 </div>
@@ -476,6 +605,9 @@
                 </button>
                 <button class="btn btn-secondary" id="batchCopyParamsBtn">
                     <i class="fa-solid fa-copy"></i> Copy Parameters
+                </button>
+                <button class="btn btn-secondary" id="batchMonteCarloBtn">
+                    <i class="fa-solid fa-dice"></i> Monte Carlo
                 </button>
                 <button class="btn btn-primary" id="batchLoadBtn">
                     <i class="fa-solid fa-pen-to-square"></i> Load into Optimizer
