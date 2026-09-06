@@ -2914,9 +2914,26 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    window.viewOptResults = async function(id) {
-        await loadResults(id);
-        switchTab('results');
+    /** Kept as the older name for opening a whole run; one implementation below. */
+    window.viewOptResults = (id) => window.viewSavedInResults(id, '');
+
+    /**
+     * Open a saved backtest in the Results tab.
+     *
+     * Loads the parent run's results table, switches to it, and pops the
+     * batch's own detail view — the same place a `#batch=` link lands, so a
+     * saved card and a shared link reach the identical screen. Without a
+     * batch id (a whole run was saved) it just opens the table.
+     */
+    window.viewSavedInResults = async function(optId, batchId) {
+        try {
+            await loadResultsFor([optId]);
+            setActiveNav('results');
+            switchTab('results');
+            if (batchId) window.viewBatch(optId, batchId);
+        } catch (e) {
+            showToast(`Could not open that run: ${e.message}`, 'error');
+        }
     };
 
     function renderSavedGroup(groupName) {
@@ -2977,6 +2994,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (fav.batch_id) {
                 actionsHtml = `
                     <button class="btn btn-secondary" style="flex:1; padding:4px;" onclick="openSaveModal('${fav.opt_id}', '${fav.batch_id}')" title="Edit Review"><i class="fa-solid fa-pen"></i></button>
+                    <button class="btn btn-secondary" style="flex:1; padding:4px;" onclick="viewSavedInResults('${fav.opt_id}', '${fav.batch_id}')" title="View Backtest in Results"><i class="fa-solid fa-eye"></i></button>
                     <button class="btn btn-secondary" style="flex:1; padding:4px;" onclick="viewBatchChart('${fav.opt_id}', '${fav.batch_id}')" title="View Chart"><i class="fa-solid fa-chart-line"></i></button>
                     <button class="btn btn-secondary" style="flex:1; padding:4px;" onclick="viewExcel('${fav.opt_id}', '${fav.batch_id}')" title="View Excel"><i class="fa-solid fa-table"></i></button>
                     <button class="btn btn-success" style="flex:1; padding:4px;" onclick="loadOptimization('${fav.opt_id}', '${fav.batch_id}')" title="Load Params"><i class="fa-solid fa-rocket"></i></button>
@@ -2984,7 +3002,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 actionsHtml = `
                     <button class="btn btn-secondary" style="flex:1; padding:4px;" onclick="openSaveModal('${fav.opt_id}', '')" title="Edit Review"><i class="fa-solid fa-pen"></i></button>
-                    <button class="btn btn-success" style="flex:1; padding:4px;" onclick="viewOptResults('${fav.opt_id}')" title="View Results"><i class="fa-solid fa-eye"></i> View Results</button>
+                    <button class="btn btn-success" style="flex:1; padding:4px;" onclick="viewSavedInResults('${fav.opt_id}', '')" title="View Backtest in Results"><i class="fa-solid fa-eye"></i> View Backtest</button>
                 `;
             }
             
@@ -3004,7 +3022,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     "${escapeHtml(fav.review || 'No notes')}"
                 </div>
                 ${metricsHtml}
-                <div style="display:flex; gap:4px; margin-top:auto;">
+                <div style="display:flex; gap:4px; margin-top:auto; flex-wrap:wrap;">
                     ${actionsHtml}
                 </div>
             `;
