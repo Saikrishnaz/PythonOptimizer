@@ -2113,3 +2113,163 @@ table.excel-table tbody tr:hover {
     border: 1px solid var(--border-color); border-radius: 8px;
 }
 
+
+
+/* =============================================================================
+   WALK-FORWARD REPORT + MONTE CARLO
+   Additive: every selector below is new, so nothing already styled changes.
+   ============================================================================= */
+
+/* ---- Walk-forward report ------------------------------------------------- */
+/* The verdict a run gets when its OOS windows were not honoured. Derived from
+   the label text with non-letters stripped, matching the other badge classes. */
+.wfo-robustness-label.invalidoosnothonoured {
+    color: var(--red); background: rgba(239, 68, 68, 0.18);
+}
+
+.wfo-report-verdict {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-lg); padding: 16px 18px; margin-top: 12px;
+}
+.wfo-report-rec { flex: 1; min-width: 260px; font-size: 13px; color: var(--text-secondary); }
+.wfo-report-summary { margin-top: 14px; }
+.wfo-report-summary p {
+    margin: 0 0 10px; font-size: 13.5px; line-height: 1.65; color: var(--text-primary);
+}
+.wfo-report-h {
+    margin: 22px 0 10px; font-size: 14px; font-weight: 600; color: var(--text-heading);
+    border-bottom: 1px solid var(--border-color); padding-bottom: 8px;
+}
+.wfo-steps-table td.pos { color: var(--green); }
+.wfo-steps-table td.neg { color: var(--red); }
+
+/* ---- Findings, shared by the report and Monte Carlo ---------------------- */
+.mc-findings { display: flex; flex-direction: column; gap: 8px; }
+.mc-finding {
+    display: flex; gap: 12px; padding: 11px 14px; border-radius: 10px;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+}
+.mc-finding .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 7px; flex: 0 0 auto; }
+.mc-finding.warning { border-color: rgba(245,158,11,0.35); }
+.mc-finding.warning .dot { background: var(--yellow); }
+.mc-finding.good { border-color: rgba(16,185,129,0.3); }
+.mc-finding.good .dot { background: var(--green); }
+.mc-finding.info .dot { background: var(--accent-blue); }
+.mc-finding .t { font-weight: 600; color: var(--text-heading); font-size: 13px; }
+.mc-finding .d { color: var(--text-secondary); font-size: 12.5px; line-height: 1.55; }
+
+.mc-alarm {
+    margin-top: 12px; padding: 14px 16px; border-radius: var(--border-radius-lg);
+    border: 1px solid rgba(239,68,68,0.5); background: rgba(239,68,68,0.08);
+}
+.mc-alarm .h { color: var(--red); font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.mc-alarm .b { color: var(--text-primary); font-size: 12.5px; line-height: 1.6; }
+.mc-verified {
+    margin-top: 12px; padding: 10px 14px; border-radius: var(--border-radius);
+    border: 1px solid var(--green-border); background: var(--green-bg);
+    color: var(--green); font-size: 12.5px;
+}
+
+/* ---- Monte Carlo: source + methods --------------------------------------- */
+.mc-intro {
+    font-size: 12.5px; line-height: 1.6; color: var(--text-secondary);
+    margin-bottom: 14px; max-width: 900px;
+}
+.mc-hint { color: var(--text-muted); font-weight: 400; font-size: 10px; }
+.mc-source-info { margin-top: 12px; }
+.mc-source-ok, .mc-source-error, .mc-loading, .mc-empty {
+    padding: 10px 14px; border-radius: var(--border-radius); font-size: 12.5px;
+    border: 1px solid var(--border-color); background: var(--bg-card);
+}
+.mc-source-ok { border-color: var(--green-border); background: var(--green-bg); color: var(--text-primary); }
+.mc-source-ok i { color: var(--green); margin-right: 6px; }
+.mc-source-error { border-color: var(--red-border); background: var(--red-bg); color: var(--text-primary); }
+.mc-source-error i { color: var(--red); margin-right: 6px; }
+.mc-loading, .mc-empty { color: var(--text-secondary); }
+.mc-loading i { color: var(--accent-blue); margin-right: 6px; }
+
+.mc-method-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;
+}
+.mc-method {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 12px 14px; border-radius: var(--border-radius);
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+.mc-method:hover { border-color: var(--border-hover); background: var(--bg-card-hover); }
+.mc-method.on { border-color: var(--accent-blue); background: var(--accent-blue-glow); }
+.mc-method input { margin-top: 3px; accent-color: var(--accent-blue); flex: 0 0 auto; }
+.mc-method-label { font-size: 13px; font-weight: 600; color: var(--text-heading); }
+.mc-method-desc { font-size: 11.5px; color: var(--text-secondary); line-height: 1.5; margin-top: 3px; }
+
+/* ---- Monte Carlo: results ------------------------------------------------ */
+.mc-actual { margin-top: 12px; }
+.mc-actual-head {
+    font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;
+}
+.mc-actual-head .mono { font-family: 'JetBrains Mono', monospace; color: var(--accent-blue); }
+.mc-method-result {
+    margin-top: 20px; padding: 16px; border-radius: var(--border-radius-lg);
+    background: var(--bg-card); border: 1px solid var(--border-color);
+}
+.mc-method-head {
+    display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between;
+    align-items: flex-start; margin-bottom: 14px;
+}
+.mc-method-title { font-size: 15px; font-weight: 700; color: var(--text-heading); }
+.mc-method-sub {
+    font-size: 12px; color: var(--text-secondary); max-width: 640px;
+    line-height: 1.55; margin-top: 3px;
+}
+.mc-method-count {
+    font-size: 11px; color: var(--text-muted);
+    font-family: 'JetBrains Mono', monospace; white-space: nowrap;
+}
+.mc-charts { display: flex; flex-direction: column; gap: 16px; margin-top: 16px; }
+.mc-chart-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--text-muted); margin-bottom: 6px;
+}
+.mc-chart {
+    background: var(--bg-secondary); border: 1px solid var(--border-color);
+    border-radius: var(--border-radius); padding: 10px;
+}
+.mc-chart svg { display: block; }
+.mc-chart-note {
+    font-size: 12.5px; color: var(--text-secondary); line-height: 1.6;
+    padding: 16px; text-align: center;
+}
+.mc-chart-note strong {
+    color: var(--text-heading); font-family: 'JetBrains Mono', monospace;
+}
+.mc-chart-axis {
+    display: flex; justify-content: space-between; gap: 10px; margin-top: 6px;
+    font-size: 10.5px; color: var(--text-muted);
+}
+.mc-chart-axis span:nth-child(2) { text-align: center; flex: 1; }
+.mc-percentiles { margin-top: 16px; }
+.mc-percentiles summary {
+    cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-secondary);
+    padding: 6px 0;
+}
+.mc-percentiles summary:hover { color: var(--text-heading); }
+
+/* ---- Mobile ------------------------------------------------------------- */
+@media (max-width: 900px) {
+    .mc-method-grid { grid-template-columns: 1fr; }
+    .mc-method-head { flex-direction: column; gap: 6px; }
+    .mc-method-count { white-space: normal; }
+    .wfo-report-verdict { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .wfo-report-rec { min-width: 0; }
+    .mc-chart-axis { font-size: 9.5px; }
+    .mc-chart-axis span:nth-child(2) { display: none; }
+    .mc-method-result { padding: 12px; }
+}
+
+@media (max-width: 560px) {
+    .mc-intro { font-size: 12px; }
+    .mc-method-title { font-size: 13.5px; }
+    .mc-finding { padding: 10px 12px; }
+}
