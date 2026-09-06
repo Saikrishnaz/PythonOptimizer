@@ -22,6 +22,15 @@ Endpoints:
   POST /api/data/convert               — Convert CSV → Parquet
   GET  /api/chart/ohlc                 — Get OHLC data for charting
   GET  /api/chart/trades/{opt_id}/{batch} — Get trade markers for a batch
+  GET  /api/walk-forward/{id}/report   — Detailed walk-forward report (JSON)
+  GET  /api/walk-forward/{id}/report.html — The same report as a standalone page
+  GET  /api/walk-forward/{id}/combined-trades — Every OOS trade, in order
+  GET  /api/monte-carlo/methods        — Available resampling methods
+  GET  /api/monte-carlo/sources        — Runs that can supply a trade log
+  GET  /api/monte-carlo/batches/{id}   — Batches of one run that kept trades
+  POST /api/monte-carlo/run            — Run a Monte Carlo simulation
+  GET  /api/monte-carlo/runs           — Saved Monte Carlo runs
+  DELETE /api/monte-carlo/runs/{id}    — Delete a saved Monte Carlo run
 """
 import asyncio
 import json
@@ -31,7 +40,7 @@ import threading
 import time
 import glob
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 import numpy as np
@@ -1399,8 +1408,13 @@ async def detect_data_range_endpoint(data_path: str = ""):
 # =============================================================================
 from walk_forward.models import WFOConfig, SelectionConfig, SelectionRule, RobustnessWeights
 from walk_forward.window_generator import generate_windows, validate_windows, detect_data_range, calculate_max_steps
-from walk_forward.runner import WalkForwardRunner
+from walk_forward.runner import (
+    WalkForwardRunner,
+    apply_date_override as wfo_apply_date_override,
+    strip_date_params as wfo_strip_date_params,
+)
 from walk_forward import persistence as wfo_persistence
+from walk_forward import report as wfo_report
 
 # Track running WFO instances
 running_wfo = {}  # run_id -> {"thread": Thread, "runner": WalkForwardRunner}
@@ -1796,26 +1810,21 @@ async def run_full_sample(run_id: str, req: FullSampleRequest):
     try:
         from optimizer_engine import run_single_backtest
 
-        # Build full-sample params
+        # Build full-sample params: fixed + candidate, then the full-sample
+        # date range LAST.
+        #
+        # A candidate parameter set is read back out of a step's results, so it
+        # can still carry that step's own date window. Merging it after the
+        # override would shrink this "full sample" run down to one in-sample
+        # window without saying so.
         params = dict(config.fixed_params)
-        # Override with full dataset date range
-        if config.date_param_style == "nested" and config.date_param_name:
-            key = config.date_param_name
-            if key in params and isinstance(params[key], dict):
-                params[key] = dict(params[key])
-                params[key]["start_date"] = config.dataset_start or config.wfo_start
-                params[key]["end_date"] = config.dataset_end or config.wfo_end
-            else:
-                params[key] = {
-                    "start_date": config.dataset_start or config.wfo_start,
-                    "end_date": config.dataset_end or config.wfo_end,
-                }
-        else:
-            params["start_date"] = config.dataset_start or config.wfo_start
-            params["end_date"] = config.dataset_end or config.wfo_end
-
-        # Merge candidate params
         params.update(req.candidate_params)
+        params = wfo_apply_date_override(
+            config,
+            wfo_strip_date_params(config, params),
+            config.dataset_start or config.wfo_start,
+            config.dataset_end or config.wfo_end,
+        )
 
         # Run in a temp directory
         wfo_dir = wfo_persistence.get_wfo_dir(run_id)
@@ -1839,6 +1848,89 @@ async def run_full_sample(run_id: str, req: FullSampleRequest):
     except Exception as e:
         raise HTTPException(500, f"Full-sample backtest failed: {str(e)}")
 
+
+
+# =============================================================================
+# WALK-FORWARD REPORT
+# =============================================================================
+
+@app.get("/api/walk-forward/{run_id}/report")
+def get_wfo_report(run_id: str, refresh: bool = False):
+    """
+    The detailed report for a run.
+
+    Generated on demand the first time it is asked for, so runs that finished
+    before reports existed get one too. `refresh=true` rebuilds it — useful
+    after a resume added steps. Declared `def` rather than `async def`: report
+    assembly reads every step's trade log, and blocking the event loop would
+    stall the live SSE streams.
+    """
+    if not os.path.isdir(wfo_persistence.get_wfo_dir(run_id)):
+        raise HTTPException(404, f"WFO run not found: {run_id}")
+
+    if not refresh:
+        cached = wfo_report.load_report(run_id)
+        if cached:
+            return {"status": "success", "cached": True, "report": cached}
+
+    try:
+        report = wfo_report.generate_report(run_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Report generation failed: {type(e).__name__}: {e}")
+
+    return {"status": "success", "cached": False, "report": report}
+
+
+@app.get("/api/walk-forward/{run_id}/report.html", response_class=HTMLResponse)
+def get_wfo_report_html(run_id: str, refresh: bool = False):
+    """The same report as a standalone page — printable, saveable, shareable."""
+    if not os.path.isdir(wfo_persistence.get_wfo_dir(run_id)):
+        raise HTTPException(404, f"WFO run not found: {run_id}")
+
+    path = wfo_report.report_html_path(run_id)
+    if refresh or not os.path.exists(path):
+        try:
+            wfo_report.generate_report(run_id)
+        except Exception as e:
+            raise HTTPException(500, f"Report generation failed: {e}")
+
+    with open(path, encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
+@app.get("/api/walk-forward/{run_id}/combined-trades")
+def get_wfo_combined_trades(run_id: str):
+    """
+    Every OOS trade from every completed step, in walk-forward order.
+
+    This is what a Monte Carlo run consumes, and it is also the honest export
+    of "what this strategy actually did out of sample".
+    """
+    config = wfo_persistence.load_wfo_config(run_id)
+    if config is None:
+        raise HTTPException(404, f"WFO run not found: {run_id}")
+
+    aggregate = wfo_persistence.load_aggregate_results(run_id) or {}
+    steps = [int(s["step"]) for s in aggregate.get("step_results", [])
+             if str(s.get("state", "")) == "completed"]
+    if not steps:
+        steps = [w.step for w in generate_windows(config)
+                 if wfo_persistence.load_step_state(run_id, w.step) == "completed"]
+
+    trades = wfo_report.load_combined_oos_trades(run_id, steps)
+    if trades.empty:
+        raise HTTPException(404, "No readable OOS trade logs for this run")
+
+    pnl = trades["pnl"].astype(float).tolist()
+    return {
+        "status": "success",
+        "run_id": run_id,
+        "steps": steps,
+        "total_trades": len(pnl),
+        "pnl": pnl,
+    }
 
 
 @app.delete("/api/walk-forward/{run_id}")
@@ -1891,6 +1983,167 @@ async def export_wfo_data(run_id: str, export_type: str):
 
 
 # =============================================================================
+# MONTE CARLO SIMULATION
+# =============================================================================
+from monte_carlo import persistence as mc_persistence
+from monte_carlo import sources as mc_sources
+from monte_carlo.engine import (
+    METHODS as MC_METHODS,
+    METHOD_LABELS as MC_METHOD_LABELS,
+    METHOD_DESCRIPTIONS as MC_METHOD_DESCRIPTIONS,
+    MAX_SIMULATIONS as MC_MAX_SIMULATIONS,
+    MonteCarloConfig,
+    simulate as mc_simulate,
+)
+
+
+class MonteCarloRequest(BaseModel):
+    """One Monte Carlo run: where the trades come from, and how to resample."""
+    source: dict = {}
+    methods: List[str] = ["resample"]
+    simulations: int = 2000
+    initial_capital: float = 100000.0
+    seed: int = 42
+    keep_pct: float = 90.0
+    noise_pct: float = 10.0
+    block_size: int = 10
+    horizon: Optional[int] = None
+    ruin_pct: float = 50.0
+    dd_limit_pct: float = 20.0
+    save: bool = True
+    label: str = ""
+
+
+@app.get("/api/monte-carlo/methods")
+async def list_mc_methods():
+    """The available resampling methods and what each one is for."""
+    return {
+        "status": "success",
+        "max_simulations": MC_MAX_SIMULATIONS,
+        "methods": [
+            {"id": m, "label": MC_METHOD_LABELS[m], "description": MC_METHOD_DESCRIPTIONS[m]}
+            for m in MC_METHODS
+        ],
+    }
+
+
+@app.get("/api/monte-carlo/sources")
+async def list_mc_sources():
+    """Optimization runs and walk-forward runs that can supply a trade log."""
+    return {"status": "success", **mc_sources.list_sources()}
+
+
+@app.get("/api/monte-carlo/batches/{optimization_id}")
+def list_mc_batches(optimization_id: str, top: int = 60):
+    """
+    Batches of one optimization that kept a trade log, best first.
+
+    `def` not `async def`: this reads the results table and stats a directory
+    per candidate batch, which does not belong on the event loop.
+    """
+    try:
+        batches = mc_sources.list_batches(optimization_id, top=top)
+    except mc_sources.SourceError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Could not list batches: {e}")
+    return {"status": "success", "optimization_id": optimization_id, "batches": batches}
+
+
+@app.post("/api/monte-carlo/inspect")
+def inspect_mc_source(req: MonteCarloRequest):
+    """
+    What a source contains, without simulating anything.
+
+    Lets the dashboard confirm the trade log is readable — and show what the
+    real backtest did — before committing to thousands of simulations.
+    """
+    try:
+        pnl, label, meta = mc_sources.resolve_source(req.source)
+    except mc_sources.SourceError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Could not load trades: {type(e).__name__}: {e}")
+
+    from monte_carlo.engine import sequence_metrics
+    return {
+        "status": "success",
+        "label": label,
+        "source": meta,
+        "total_trades": int(pnl.size),
+        "actual": sequence_metrics(pnl, req.initial_capital or 100000.0),
+    }
+
+
+@app.post("/api/monte-carlo/run")
+def run_monte_carlo(req: MonteCarloRequest):
+    """
+    Resample one trade log and return the distribution of outcomes.
+
+    Runs synchronously in FastAPI's thread pool (hence `def`) — a few seconds
+    of numpy for a typical run, and keeping it off the event loop leaves the
+    optimizer's SSE streams untouched.
+    """
+    try:
+        pnl, label, meta = mc_sources.resolve_source(req.source)
+    except mc_sources.SourceError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Could not load trades: {type(e).__name__}: {e}")
+
+    config = MonteCarloConfig.from_dict(req.model_dump())
+    started = time.time()
+    try:
+        result = mc_simulate(pnl, config)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except MemoryError:
+        raise HTTPException(
+            507, "Not enough memory for that many simulations. Lower the "
+                 "simulation count and try again.")
+    except Exception as e:
+        raise HTTPException(500, f"Simulation failed: {type(e).__name__}: {e}")
+
+    result["elapsed_seconds"] = round(time.time() - started, 2)
+    result["source"] = meta
+    result["source_label"] = req.label or label
+    result["created_at"] = datetime.now().isoformat(timespec="seconds")
+
+    run_id = ""
+    if req.save:
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        result["run_id"] = run_id
+        try:
+            mc_persistence.save_run(run_id, result)
+        except Exception as e:
+            # A result that cannot be filed is still a result worth returning.
+            result["save_error"] = str(e)
+
+    return {"status": "success", "run_id": run_id, "result": result}
+
+
+@app.get("/api/monte-carlo/runs")
+async def list_mc_runs():
+    """Previously saved Monte Carlo runs, newest first."""
+    return {"status": "success", "runs": mc_persistence.list_runs()}
+
+
+@app.get("/api/monte-carlo/runs/{mc_run_id}")
+async def get_mc_run(mc_run_id: str):
+    result = mc_persistence.load_run(mc_run_id)
+    if result is None:
+        raise HTTPException(404, f"Monte Carlo run not found: {mc_run_id}")
+    return {"status": "success", "run_id": mc_run_id, "result": result}
+
+
+@app.delete("/api/monte-carlo/runs/{mc_run_id}")
+async def delete_mc_run(mc_run_id: str):
+    if mc_persistence.delete_run(mc_run_id):
+        return {"status": "deleted", "run_id": mc_run_id}
+    raise HTTPException(404, f"Monte Carlo run not found: {mc_run_id}")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 if __name__ == "__main__":
@@ -1901,6 +2154,7 @@ if __name__ == "__main__":
     print(f"  Backtests Dir  : {BACKTESTS_DIR}")
     print(f"  Optimizations  : {OPTIMIZATIONS_DIR}")
     print(f"  WFO Runs       : {wfo_persistence.WFO_RUNS_DIR}")
+    print(f"  Monte Carlo    : {mc_persistence.MC_RUNS_DIR}")
     print(f"  Static Files   : {STATIC_DIR}")
     print("=" * 65)
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
